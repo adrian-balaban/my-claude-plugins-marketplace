@@ -9,9 +9,11 @@ npm run build          # Bundle src/index.ts → dist/index.js (esbuild, CJS)
 npm run build:watch    # Same, with watch mode
 npm run dev            # Run via tsx without building (dev only)
 npm run typecheck      # tsc --noEmit
-npm test               # vitest run (all tests)
+npm test               # vitest run — unit + component tests (excludes integration)
 npm run test:watch     # vitest (watch mode)
 npm run test:coverage  # vitest run --coverage (95% line/fn/stmt, 90% branch thresholds)
+npm run test:integration  # build then vitest run --config vitest.integration.config.ts
+                         # spawns real dist/index.js over stdio (slow, needs build)
 npx vitest run src/__tests__/ebbinghaus.test.ts  # run a single test file
 ```
 

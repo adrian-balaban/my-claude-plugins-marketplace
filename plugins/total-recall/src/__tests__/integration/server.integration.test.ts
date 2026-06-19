@@ -25,11 +25,13 @@ let client: Client;
 let transport: StdioClientTransport;
 let childPid: number | undefined;
 
-function text(res: { content: Array<{ type: string; text?: string }> }) {
-  return res.content.map((c) => c.text ?? '').join('');
+function text(res: any): string {
+  return (res.content as Array<{ type: string; text?: string }>)
+    .map((c) => c.text ?? '')
+    .join('');
 }
 
-function json(res: { content: Array<{ type: string; text?: string }> }) {
+function json(res: any): any {
   return JSON.parse(text(res));
 }
 
@@ -103,14 +105,19 @@ describe('total-recall over real stdio', () => {
     expect(stored.key).toMatch(/^knowledge\//);
     expect(fs.existsSync(stored.filePath)).toBe(true);
 
+    // TF-IDF inverted index is rebuilt on a debounce after store; force it so the
+    // just-stored memory is searchable immediately (mirrors the component tests).
+    await client.callTool({ name: 'rebuild_index', arguments: {} });
+
     const recalled = json(
       await client.callTool({
         name: 'recall_memory',
         arguments: { query: 'round-tripped stdio' },
       }),
     );
-    expect(recalled.memories.length).toBeGreaterThan(0);
-    expect(recalled.memories[0].key).toBe(stored.key);
+    expect(Array.isArray(recalled)).toBe(true);
+    expect(recalled.length).toBeGreaterThan(0);
+    expect(recalled[0].key).toBe(stored.key);
   });
 
   it('routes an org-tagged memory to the org vault path', async () => {
@@ -138,6 +145,7 @@ describe('total-recall over real stdio', () => {
         category: 'knowledge',
       },
     });
+    await client.callTool({ name: 'rebuild_index', arguments: {} });
 
     const found = json(
       await client.callTool({
@@ -145,8 +153,8 @@ describe('total-recall over real stdio', () => {
         arguments: { query: 'search target unique' },
       }),
     );
-    expect(Array.isArray(found.results)).toBe(true);
-    expect(found.results.some((r: any) => /search-target-unique/.test(r.key))).toBe(true);
+    expect(Array.isArray(found)).toBe(true);
+    expect(found.some((r: any) => /search-target-unique/.test(r.key))).toBe(true);
   });
 
   it('rejects a duplicate key when force is not set', async () => {
@@ -170,7 +178,7 @@ describe('total-recall over real stdio', () => {
 
   it('list_memories returns the stored entries', async () => {
     const listed = json(await client.callTool({ name: 'list_memories', arguments: {} }));
-    expect(Array.isArray(listed.memories)).toBe(true);
-    expect(listed.memories.length).toBeGreaterThan(0);
+    expect(Array.isArray(listed)).toBe(true);
+    expect(listed.length).toBeGreaterThan(0);
   });
 });
