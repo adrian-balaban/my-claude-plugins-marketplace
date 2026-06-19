@@ -15,36 +15,36 @@ HOOK_INPUT=$(cat)
 # transports send the object unwrapped. Handle both, then fall back to
 # tool_input.key (present on the request side) if the response carried no key.
 # Emit "<key>\x1f<delete-flag>" (\x1f = ASCII unit separator) so bash can split it
-# without a second python call — see the comment at the `read` below for why \x1f
+# without a second parse call — see the comment at the `read` below for why \x1f
 # (not a tab) is the delimiter.
-PARSED=$(printf '%s' "$HOOK_INPUT" | python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    d = {}
-tool_name = d.get("tool_name") or ""
-resp = d.get("tool_response")
-key = ""
-if isinstance(resp, dict):
-    content = resp.get("content")
-    if isinstance(content, list):
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                try:
-                    p = json.loads(item.get("text") or "")
-                except Exception:
-                    p = None
-                if isinstance(p, dict) and p.get("key"):
-                    key = p["key"]
-                    break
-    if not key and resp.get("key"):
-        key = resp["key"]
-if not key:
-    tin = d.get("tool_input")
-    if isinstance(tin, dict) and tin.get("key"):
-        key = tin["key"]
-print("%s\x1f%d" % (key, 1 if tool_name.endswith("delete_memory") else 0))
+# Parse via node (node is this plugin's hard dependency; python3 is not guaranteed,
+# so a python3 parser would silently no-op org sync on python3-less systems — the
+# same silent-no-op class the other hooks were fixed to avoid).
+PARSED=$(printf '%s' "$HOOK_INPUT" | node -e '
+let s = "";
+process.stdin.on("data", d => s += d).on("end", () => {
+  let d = {};
+  try { d = JSON.parse(s); } catch {}
+  const tn = d.tool_name || "";
+  let key = "";
+  const resp = d.tool_response;
+  if (resp && typeof resp === "object" && !Array.isArray(resp)) {
+    const content = resp.content;
+    if (Array.isArray(content)) {
+      for (const it of content) {
+        if (it && it.type === "text") {
+          let p = null;
+          try { p = JSON.parse(it.text || ""); } catch {}
+          if (p && p.key) { key = p.key; break; }
+        }
+      }
+    }
+    if (!key && resp.key) key = resp.key;
+  }
+  if (!key && d.tool_input && d.tool_input.key) key = d.tool_input.key;
+  const flag = tn.endsWith("delete_memory") ? 1 : 0;
+  process.stdout.write(key + "\x1f" + flag);
+});
 ' 2>/dev/null || true)
 
 # \x1f (ASCII unit separator) is non-whitespace. bash `read` strips a LEADING
