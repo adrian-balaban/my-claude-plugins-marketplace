@@ -1,0 +1,34 @@
+{
+  "name": "total-recall",
+  "version": "1.0.2",
+  "description": "Persistent memory MCP server for Claude Code",
+  "main": "dist/index.js",
+  "scripts": {
+    "build:esbuild": "./node_modules/.bin/esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/index.js --define:__PLUGIN_VERSION__=\"\\\"$npm_package_version\\\"\" --external:fsevents --external:@huggingface/transformers --external:sqlite-vec --external:better-sqlite3",
+    "build": "npm run build:esbuild",
+    "build:watch": "npm run build:esbuild -- --watch",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.8",
+    "esbuild": "^0.28.1",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.8"
+  },
+  "optionalDependencies": {
+    "@huggingface/transformers": "^3.8.1",
+    "sqlite-vec": "^0.1.9",
+    "better-sqlite3": "^12.10.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

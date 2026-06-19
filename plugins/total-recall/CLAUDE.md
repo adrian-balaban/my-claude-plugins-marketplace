@@ -1,0 +1,90 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+```bash
+npm run build          # Bundle src/index.ts → dist/index.js (esbuild, CJS)
+npm run build:watch    # Same, with watch mode
+npm run dev            # Run via tsx without building (dev only)
+npm run typecheck      # tsc --noEmit
+npm test               # vitest run (all tests)
+npm run test:watch     # vitest (watch mode)
+npm run test:coverage  # vitest run --coverage (95% line/fn/stmt, 90% branch thresholds)
+npx vitest run src/__tests__/ebbinghaus.test.ts  # run a single test file
+```
+
+Tests run sequentially (maxWorkers=1) because the server has module-level state (the shared singletons in `src/state.ts`).
+
+## Architecture
+
+This is an MCP server that exposes 12 tools for persistent memory management. It runs as a stdio process registered with Claude Code via `claude mcp add`. The entry point `src/index.ts` is a thin boot stub (signal handlers + `main()`); everything else is split across focused modules:
+
+- `src/server.ts` — `Server` construction, the 12 tool schemas, the `CallTool` dispatch switch, and `main()`
+- `src/state.ts` — the shared in-memory singletons (`memIndex`, `invertedIndex`, `errors`, `perfSamples`). These are `const` objects with a stable identity; every module that reads/writes the index imports them from here so there is exactly one index across the process. Mutate in place (`memIndex[key] = …`, `delete memIndex[key]`); the two sites that formerly reassigned them (`loadIndexes`, `rebuildInvertedIndex`) now clear-then-populate the same object
+- `src/paths.ts` — vault/DB/index paths, `EXCLUDED_DIRS`, `DEFAULT_CATEGORIES`, `ensureDir`
+- `src/types.ts` — `MemoryFrontmatter`, `MemoryMetadata`, `Index`, `InvertedIndex`
+- `src/lru-cache.ts` — `LRUCache` + the shared `contentCache` instance
+- `src/persistence.ts` — `loadIndexes`, debounced `scheduleSave`/`scheduleIdfRecalc`, `saveNow`/`recalcIdfNow`/`flushPending`, `buildIndexCache` (owns the debounce timers)
+- `src/tfidf.ts` — `tokenize`, `rebuildInvertedIndex`, `tfidfSearch`
+- `src/vault-scan.ts` — `reconcileIndex`, `indexFile`, `deriveCategory`, `keyFromPath`, `slugify`, `tokenEstimate`
+- `src/dates.ts` — `parseRelativeDate`
+- `src/journal.ts` — `appendJournal`
+- `src/tools/{store,recall,query,mutate}.ts` — the 12 tool implementations
+
+**Data flow:**
+1. On boot, loads `~/.total-recall/index.json` + `invertedIndex.json` into memory. If empty, scans both vaults.
+2. All tool calls operate against the in-memory `memIndex` (Record<key, MemoryMetadata>).
+3. Writes are debounced: `scheduleSave()` waits 1s → writes index → triggers `scheduleIdfRecalc()` at +2s → rebuilds TF-IDF inverted index → writes `.index-cache.txt`.
+
+**Dual vault routing:**
+- Personal vault: `~/.total-recall/personal/` — default for all memories
+- Org vault: `~/.total-recall/org/org-vault/` — used when tag `org` is present; synced to the repo configured via `orgRepo` in `~/.total-recall/config.json` (branch `knowledge`) via `scripts/sync-org-memory.cjs`
+- Keys are relative paths from vault root; org keys are prefixed `org/`
+- Org sync runs a privacy filter: blocks secret tokens, all email addresses (fail-closed by default; allow your company domain via `allowedEmailDomains` in `~/.total-recall/config.json`), personal pronouns, and phone numbers before any push
+
+**Search pipeline:**
+- Primary: TF-IDF (`invertedIndex.json`) × Ebbinghaus retention decay (`src/ebbinghaus.ts`)
+- TF-IDF tokenizes over `title + tags + contentPreview` (first ~500 chars of body stored in the index, not the full file)
+- Optional hybrid: TF-IDF + vector embeddings fused via Reciprocal Rank Fusion (`src/rrf.ts`)
+- Vector path requires optional deps (`@huggingface/transformers`, `sqlite-vec`, `better-sqlite3`); gracefully degrades
+
+**Supporting modules:**
+- `src/frontmatter.ts` — minimal YAML-frontmatter parse/stringify (replaces gray-matter; handles inline + block arrays, immune to the js-yaml merge-key DoS)
+- `src/ebbinghaus.ts` — retention strength formula: `importance × exp(-λ × days) × (1 + accessCount × 0.2)`
+- `src/embeddings.ts` — lazy-loads HuggingFace pipeline (`Xenova/all-MiniLM-L6-v2`), no-op if missing
+- `src/vectorStore.ts` — sqlite-vec upsert/search/delete wrapper
+- `src/rrf.ts` — Reciprocal Rank Fusion (k=60)
+
+**Hooks** (`hooks/hooks.json`):
+- `SessionStart`: pull org vault → rebuild index cache → inject memory index → inject open questions
+- `PostToolUse` (store/update/delete): sync to org vault if tagged `org`
+- `PreCompact`: extract 0–3 learnings from transcript via `extract-and-store-memories.sh` (requires `CLAUDE_TRANSCRIPT_PATH` env var) → pipes JSON lines to `hooks/scripts/store-learning.cjs` which writes them directly as frontmatter `.md` files to the personal vault (no MCP round-trip; never overwrites existing files)
+
+## Memory Workflow
+
+When using total-recall tools, follow the retrieval order in `skills/memory-workflow/SKILL.md`:
+1. Check the injected index already in context (free)
+2. `get_memories_by_keys(..., summary=true)` — if key is known
+3. `get_memories_by_keys(..., summary=false)` — if full content needed
+4. `search_index(query=...)` — metadata-only, no file reads
+5. `recall_memory(query=..., full=false)` — TF-IDF + Ebbinghaus
+6. `recall_memory(query=..., full=true)` — with full content
+
+Every stored memory must include a `## Executive Summary` section (answers WHY it matters, not just WHAT). Call `store_memory` from the main agent, never a subagent. Check for duplicates with `search_index` before storing. Set `importanceScore` (0.3=low, 0.7=high, 1.0=critical).
+
+## Key Gotchas
+
+- `org` tag routes to the shared vault
+- `EXCLUDED_DIRS` in `src/paths.ts` skips `projects`, `templates`, `.obsidian`, etc. during vault scan
+- `category` is derived from the first subdirectory under the vault root; files at vault root get category `knowledge`
+- `journal` entries are auto-appended on `store_memory` only (personal memories only — org stores are skipped); `update_memory` and `delete_memory` do NOT write journal entries; never store to `journal` manually
+- `since` date filter in `list_memories` silently excludes memories with a missing `updated` field (by design)
+- `rebuild_index` preserves `accessCount`/`lastAccessed` — safe to run anytime
+- `store_memory` `force=true` — overwrites an existing memory at the same key, preserving `created` and `accessCount`; without it, a duplicate key throws
+- Org memory author protection — both `store_memory` (even with `force=true`) and `update_memory` throw if the existing org memory's `author` field differs from the current OS user; personal memories have no author guard
+- `personal` + `org` tags are mutually exclusive — `store_memory` throws if both are present on the same memory
+- `sessions` history in `update_memory` — deduplicated, capped at the last 50 entries; not replaced wholesale
+- `contentCache` is an LRU (100 entries, 30-min TTL) — `recall_memory(full=true)` and `get_memories_by_keys` read through it; `update_memory` and `delete_memory` invalidate entries on write
+- Build externalizes `@huggingface/transformers`, `sqlite-vec`, `better-sqlite3`, and `fsevents` — these must remain optional

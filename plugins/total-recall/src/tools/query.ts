@@ -1,0 +1,103 @@
+import * as fs from 'fs';
+import { parseFrontmatter } from '../frontmatter.js';
+import { computeRetentionStrength, daysSince } from '../ebbinghaus.js';
+import { parseRelativeDate } from '../dates.js';
+import { memIndex, errors, perfSamples } from '../state.js';
+import { contentCache } from '../lru-cache.js';
+import { scheduleSave } from '../persistence.js';
+import { isVectorAvailable } from '../embeddings.js';
+
+export function listMemories(args: any): any {
+  const { category, tag, limit = 50 } = args;
+  return Object.values(memIndex)
+    .filter(m => (!category || m.category === category) && (!tag || m.tags.includes(tag)))
+    .sort((a, b) => new Date(b.updated).getTime() - new Date(a.updated).getTime())
+    .slice(0, limit)
+    .map(({ key, title, category, tags, updated, importanceScore, tokenEstimate }) => ({
+      key, title, category, tags, updated, importanceScore, tokenEstimate,
+    }));
+}
+
+export function getMemoriesByKeys(args: any): any {
+  const { keys, summary = false } = args;
+  return keys.map((key: string) => {
+    const meta = memIndex[key];
+    if (!meta) return { key, error: 'Not found' };
+    meta.accessCount++;
+    meta.lastAccessed = new Date().toISOString();
+    scheduleSave();
+    if (summary) {
+      const raw = fs.readFileSync(meta.filePath, 'utf8');
+      const { content } = parseFrontmatter(raw);
+      const execSummary = content.match(/## Executive Summary\n+([\s\S]{0,500})/)?.[1] ?? content.slice(0, 500);
+      return { key, title: meta.title, category: meta.category, tags: meta.tags, summary: execSummary.trim() };
+    }
+    let content = contentCache.get(key);
+    if (!content) {
+      try {
+        const raw = fs.readFileSync(meta.filePath, 'utf8');
+        content = parseFrontmatter(raw).content; // strip YAML frontmatter
+      } catch { content = ''; }
+      contentCache.set(key, content!);
+    }
+    return { ...meta, key, content };
+  });
+}
+
+export function getStats(): any {
+  const byCategory: Record<string, number> = {};
+  for (const m of Object.values(memIndex)) {
+    byCategory[m.category] = (byCategory[m.category] ?? 0) + 1;
+  }
+  const perf = [...perfSamples].sort((a, b) => a - b);
+  const pct = (p: number) => perf[Math.floor(perf.length * p)] ?? 0;
+  return {
+    total: Object.keys(memIndex).length,
+    byCategory,
+    cache: contentCache.stats(),
+    performance: { p50: pct(0.5), p95: pct(0.95), p99: pct(0.99) },
+    recentErrors: errors.slice(-10),
+    vectorSearchEnabled: isVectorAvailable(),
+  };
+}
+
+export function getTimeline(args: any): any {
+  const { since, limit = 50, category } = args;
+  const cutoff = since ? (parseRelativeDate(since) ?? new Date(since)) : new Date(0);
+  return Object.values(memIndex)
+    .filter(m => new Date(m.updated) >= cutoff && (!category || m.category === category))
+    .sort((a, b) => new Date(b.updated).getTime() - new Date(a.updated).getTime())
+    .slice(0, limit)
+    .map(m => ({ key: m.key, title: m.title, category: m.category, tags: m.tags, updated: m.updated }));
+}
+
+export function getRelatedMemories(args: any): any {
+  const { key, limit = 10, includeContent = false } = args;
+  const source = memIndex[key];
+  if (!source) throw new Error(`Memory not found: ${key}`);
+
+  const srcTags = new Set(source.tags);
+  return Object.values(memIndex)
+    .filter(m => m.key !== key)
+    .map(m => {
+      const shared = m.tags.filter(t => srcTags.has(t)).length;
+      const categoryBoost = m.category === source.category ? 0.2 : 0;
+      return { key: m.key, title: m.title, category: m.category, tags: m.tags, score: shared / (srcTags.size + m.tags.length - shared) + categoryBoost };
+    })
+    .filter(m => m.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
+export function pruneMemories(args: any): any {
+  const { threshold = 0.1, limit = 20 } = args;
+  return Object.values(memIndex)
+    .map(m => ({
+      key: m.key, title: m.title, category: m.category,
+      retentionStrength: computeRetentionStrength(m.importanceScore, daysSince(m.updated), m.accessCount),
+      lastAccessed: m.lastAccessed, importanceScore: m.importanceScore,
+    }))
+    .filter(m => m.retentionStrength < threshold)
+    .sort((a, b) => a.retentionStrength - b.retentionStrength)
+    .slice(0, limit);
+}

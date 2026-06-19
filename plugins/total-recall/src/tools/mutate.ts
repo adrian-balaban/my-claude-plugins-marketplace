@@ -1,0 +1,86 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import { parseFrontmatter, stringifyFrontmatter } from '../frontmatter.js';
+import { VECTORS_DB } from '../paths.js';
+import { reconcileIndex } from '../vault-scan.js';
+import { rebuildInvertedIndex } from '../tfidf.js';
+import { memIndex } from '../state.js';
+import { contentCache } from '../lru-cache.js';
+import { scheduleSave } from '../persistence.js';
+import { embed } from '../embeddings.js';
+import { upsertVector, deleteVector } from '../vectorStore.js';
+import type { MemoryFrontmatter } from '../types.js';
+
+export function updateMemory(args: any): any {
+  const { key, content, tags, importanceScore, sessionId } = args;
+  const meta = memIndex[key];
+  if (!meta) throw new Error(`Memory not found: ${key}`);
+
+  const raw = fs.readFileSync(meta.filePath, 'utf8');
+  const parsed = parseFrontmatter(raw);
+  const now = new Date().toISOString();
+
+  // Org memories are author-protected, mirroring store_memory's guard.
+  if (meta.isOrg) {
+    const existingAuthor = (parsed.data as Partial<MemoryFrontmatter>).author;
+    if (existingAuthor && existingAuthor !== os.userInfo().username) {
+      throw new Error(`Cannot update org memory authored by ${existingAuthor}.`);
+    }
+  }
+
+  const prevSessions = Array.isArray(parsed.data.sessions) ? parsed.data.sessions : [];
+  const sessions = [...new Set([...prevSessions, ...(sessionId ? [sessionId] : [])])].slice(-50);
+
+  const newFm = {
+    ...parsed.data,
+    tags: tags ?? parsed.data.tags,
+    importanceScore: importanceScore ?? parsed.data.importanceScore,
+    updated: now,
+    sessions,
+  };
+
+  const newContent = content ?? parsed.content;
+  fs.writeFileSync(meta.filePath, stringifyFrontmatter(newContent, newFm));
+
+  Object.assign(meta, {
+    tags: newFm.tags,
+    importanceScore: newFm.importanceScore,
+    updated: now,
+    sessions: newFm.sessions,
+    contentPreview: newContent.trim().slice(0, 500),
+  });
+
+  contentCache.delete(key);
+  scheduleSave();
+
+  if (content) {
+    embed(content).then(vec => {
+      if (vec) upsertVector(VECTORS_DB, key, vec);
+    }).catch(() => {});
+  }
+
+  return { key, message: 'Memory updated.' };
+}
+
+export function deleteMemory(args: any): any {
+  const { key } = args;
+  const meta = memIndex[key];
+  if (!meta) throw new Error(`Memory not found: ${key}`);
+
+  fs.unlinkSync(meta.filePath);
+  delete memIndex[key];
+  contentCache.delete(key);
+  deleteVector(VECTORS_DB, key).catch(() => {});
+  scheduleSave();
+
+  return { key, message: 'Memory deleted.' };
+}
+
+export function rebuildIndex(): any {
+  // Reconcile against disk: add new/updated files, drop deleted ones, and preserve
+  // runtime accessCount/lastAccessed for memories that still exist.
+  reconcileIndex();
+  rebuildInvertedIndex();
+  scheduleSave();
+  return { message: `Index rebuilt. ${Object.keys(memIndex).length} memories indexed.` };
+}
