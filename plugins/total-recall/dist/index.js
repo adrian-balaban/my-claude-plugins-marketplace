@@ -15642,6 +15642,13 @@ ${lines.join("\n")}
 ---
 ${content}`;
 }
+function withExecutiveSummary(content) {
+  return content.trimStart().startsWith("## Executive Summary") ? `
+${content.trimStart()}` : `
+## Executive Summary
+
+${content}`;
+}
 function unquote(s) {
   const t = s.trim();
   if (t.startsWith("'") && t.endsWith("'") || t.startsWith('"') && t.endsWith('"')) {
@@ -15741,7 +15748,8 @@ function needsQuotes(s) {
 
 // src/vault-scan.ts
 function slugify2(title) {
-  return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
+  return slug || "untitled";
 }
 function keyFromPath(filePath, isOrg) {
   const base = isOrg ? ORG_VAULT : PERSONAL_VAULT;
@@ -15794,7 +15802,7 @@ function indexFile(filePath, isOrg) {
       created: fm.created ?? (/* @__PURE__ */ new Date()).toISOString(),
       updated: fm.updated ?? (/* @__PURE__ */ new Date()).toISOString(),
       importanceScore: fm.importanceScore ?? 0.5,
-      category: isOrg ? "org" : deriveCategory(filePath, isOrg),
+      category: deriveCategory(filePath, isOrg),
       contentPreview: content.trim().slice(0, 500),
       accessCount: existing?.accessCount ?? 0,
       lastAccessed: existing?.lastAccessed ?? (/* @__PURE__ */ new Date()).toISOString(),
@@ -15892,7 +15900,7 @@ async function embed(text) {
   return embedder(text);
 }
 function isVectorAvailable() {
-  return pipeline !== null || !loadAttempted;
+  return pipeline !== null;
 }
 
 // src/vectorStore.ts
@@ -15980,10 +15988,8 @@ function storeMemory(args) {
     updated: now,
     importanceScore
   };
-  const fileContent = stringifyFrontmatter(`
-## Executive Summary
-
-${content}`, fm);
+  const body = withExecutiveSummary(content);
+  const fileContent = stringifyFrontmatter(body, fm);
   fs5.writeFileSync(filePath, fileContent);
   const existing = memIndex[key];
   memIndex[key] = {
@@ -15997,13 +16003,13 @@ ${content}`, fm);
     updated: now,
     importanceScore,
     category,
-    contentPreview: content.slice(0, 500),
+    contentPreview: body.trim().slice(0, 500),
     accessCount: existing?.accessCount ?? 0,
     lastAccessed: existing?.lastAccessed ?? now,
     tokenEstimate: tokenEstimate(fileContent),
     isOrg
   };
-  contentCache.set(key, content);
+  contentCache.set(key, body);
   if (!isOrg) appendJournal("store", key, title);
   scheduleSave();
   embed(content).then((vec) => {
@@ -16043,13 +16049,13 @@ async function recallMemory(args) {
   const { query, full = false, since, limit = 10, excludeJournal = true, hybrid = true } = args;
   const tfidfResults = tfidfSearch(query, excludeJournal);
   let ranked;
-  if (hybrid && isVectorAvailable()) {
+  if (hybrid) {
     try {
       const qvec = await embed(query);
       if (qvec) {
         const vecResults = await searchVector(VECTORS_DB, qvec, 50);
         const fused = reciprocalRankFusion([tfidfResults, vecResults]);
-        ranked = [...fused.entries()].map(([key, score]) => ({ key, score }));
+        ranked = [...fused.entries()].map(([key, score]) => ({ key, score })).sort((a, b) => b.score - a.score);
       } else {
         ranked = tfidfResults;
       }
@@ -16130,8 +16136,13 @@ function getMemoriesByKeys(args) {
     meta2.lastAccessed = (/* @__PURE__ */ new Date()).toISOString();
     scheduleSave();
     if (summary) {
-      const raw = fs7.readFileSync(meta2.filePath, "utf8");
-      const { content: content2 } = parseFrontmatter(raw);
+      let content2 = "";
+      try {
+        const raw = fs7.readFileSync(meta2.filePath, "utf8");
+        content2 = parseFrontmatter(raw).content;
+      } catch {
+        return { key, error: "Failed to read memory file" };
+      }
       const execSummary = content2.match(/## Executive Summary\n+([\s\S]{0,500})/)?.[1] ?? content2.slice(0, 500);
       return { key, title: meta2.title, category: meta2.category, tags: meta2.tags, summary: execSummary.trim() };
     }
@@ -16217,7 +16228,7 @@ function updateMemory(args) {
     updated: now,
     sessions
   };
-  const newContent = content ?? parsed.content;
+  const newContent = content ? withExecutiveSummary(content) : parsed.content;
   fs8.writeFileSync(meta2.filePath, stringifyFrontmatter(newContent, newFm));
   Object.assign(meta2, {
     tags: newFm.tags,
@@ -16240,7 +16251,10 @@ function deleteMemory(args) {
   const { key } = args;
   const meta2 = memIndex[key];
   if (!meta2) throw new Error(`Memory not found: ${key}`);
-  fs8.unlinkSync(meta2.filePath);
+  try {
+    fs8.unlinkSync(meta2.filePath);
+  } catch {
+  }
   delete memIndex[key];
   contentCache.delete(key);
   deleteVector(VECTORS_DB, key).catch(() => {

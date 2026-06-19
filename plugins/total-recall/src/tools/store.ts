@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { parseFrontmatter, stringifyFrontmatter } from '../frontmatter.js';
+import { parseFrontmatter, stringifyFrontmatter, withExecutiveSummary } from '../frontmatter.js';
 import { ORG_VAULT, PERSONAL_VAULT, VECTORS_DB, ensureDir } from '../paths.js';
 import { slugify, keyFromPath, tokenEstimate } from '../vault-scan.js';
 import { memIndex } from '../state.js';
@@ -55,19 +55,24 @@ export function storeMemory(args: any): any {
     importanceScore,
   };
 
-  const fileContent = stringifyFrontmatter(`\n## Executive Summary\n\n${content}`, fm);
+  // withExecutiveSummary is idempotent: if `content` already begins with the
+  // header it leaves it intact, so we never double-prefix. The cached value and
+  // the contentPreview both derive from this same disk body, so a cache hit and a
+  // cache miss (re-read from disk via parseFrontmatter) yield identical content.
+  const body = withExecutiveSummary(content);
+  const fileContent = stringifyFrontmatter(body, fm);
   fs.writeFileSync(filePath, fileContent);
 
   const existing = memIndex[key];
   memIndex[key] = {
     key, filePath, title, tags, author: fm.author, sessions: fm.sessions,
     created: fm.created, updated: now, importanceScore, category,
-    contentPreview: content.slice(0, 500),
+    contentPreview: body.trim().slice(0, 500),
     accessCount: existing?.accessCount ?? 0,
     lastAccessed: existing?.lastAccessed ?? now,
     tokenEstimate: tokenEstimate(fileContent), isOrg,
   };
-  contentCache.set(key, content);
+  contentCache.set(key, body);
 
   if (!isOrg) appendJournal('store', key, title);
   scheduleSave();

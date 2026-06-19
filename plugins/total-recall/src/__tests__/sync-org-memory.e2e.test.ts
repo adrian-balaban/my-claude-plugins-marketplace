@@ -1,0 +1,147 @@
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import { spawnSync } from 'child_process';
+
+// End-to-end test of scripts/sync-org-memory.cjs against a real (local, bare) git
+// remote. Proves the #1 fix — org sync actually commits+pushes the file already on
+// disk in the org-vault working tree — plus the delete, skip, and privacy-block
+// paths. No network: the remote is a local bare repo; HOME is redirected so the
+// script reads a temp config and `gh auth token` fails closed (no real token touched).
+
+const REPO_ROOT = path.resolve(__dirname, '..', '..');
+const SCRIPT = path.join(REPO_ROOT, 'scripts', 'sync-org-memory.cjs');
+
+const GIT_ENV: NodeJS.ProcessEnv = {
+  ...process.env,
+  GIT_AUTHOR_NAME: 'Tester',
+  GIT_AUTHOR_EMAIL: 'tester@example.com',
+  GIT_COMMITTER_NAME: 'Tester',
+  GIT_COMMITTER_EMAIL: 'tester@example.com',
+  GIT_TERMINAL_PROMPT: '0',
+};
+
+function has(bin: string): boolean {
+  return spawnSync(bin, ['--version'], { stdio: 'ignore' }).status === 0;
+}
+const OK = has('git') && has('node');
+
+let tmpHome: string;
+let remote: string;
+let orgDir: string;
+let orgVault: string;
+let prevHome: string | undefined;
+
+function git(args: string[], opts: { cwd?: string } = {}): string {
+  const r = spawnSync('git', args, { encoding: 'utf8', stdio: 'pipe', env: GIT_ENV, ...opts });
+  if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${(r.stderr ?? '').trim()}`);
+  return (r.stdout ?? '').trim();
+}
+
+function writeMkdir(p: string, contents: string) {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, contents);
+}
+
+function runCjs(key: string, extra: string[] = []): { stdout: string; stderr: string } {
+  const env: NodeJS.ProcessEnv = { ...GIT_ENV, HOME: tmpHome };
+  delete env.GH_TOKEN;
+  delete env.GITHUB_TOKEN;
+  const r = spawnSync('node', [SCRIPT, key, ...extra], { encoding: 'utf8', stdio: 'pipe', env });
+  return { stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+function remoteTree(): string[] {
+  return git(['ls-tree', '-r', '--name-only', 'knowledge'], { cwd: remote }).split('\n').filter(Boolean);
+}
+
+function writeOrgMemory(relKey: string, fm: Record<string, unknown>, body: string) {
+  const fmLines = Object.entries(fm)
+    .map(([k, v]) => (Array.isArray(v) ? `${k}: [${(v as unknown[]).join(', ')}]` : `${k}: ${JSON.stringify(v)}`))
+    .join('\n');
+  writeMkdir(path.join(orgVault, `${relKey}.md`), `---\n${fmLines}\n---\n${body}`);
+}
+
+const suite = OK ? describe : describe.skip;
+
+suite('sync-org-memory.cjs end-to-end (#1: org sync actually commits+pushes)', () => {
+  beforeAll(() => {
+    prevHome = process.env.HOME;
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'tr-e2e-'));
+    remote = path.join(tmpHome, 'remote.git');
+    orgDir = path.join(tmpHome, '.total-recall', 'org');
+    orgVault = path.join(orgDir, 'org-vault');
+
+    // Bare remote whose default branch is knowledge.
+    git(['init', '--bare', remote]);
+    git(['symbolic-ref', 'HEAD', 'refs/heads/knowledge'], { cwd: remote });
+
+    // Local org-vault repo on knowledge with an initial commit, pointing at the remote
+    // so the script's `git pull --ff-only` / `git push` have somewhere to go.
+    fs.mkdirSync(orgDir, { recursive: true });
+    git(['init', orgDir]);
+    git(['symbolic-ref', 'HEAD', 'refs/heads/knowledge'], { cwd: orgDir });
+    git(['remote', 'add', 'origin', remote], { cwd: orgDir });
+    git(['commit', '--allow-empty', '-m', 'init'], { cwd: orgDir });
+    git(['push', '-u', 'origin', 'knowledge'], { cwd: orgDir });
+
+    // config.json points orgRepo at the bare remote (no allowedEmailDomains → fail-closed).
+    writeMkdir(path.join(tmpHome, '.total-recall', 'config.json'), JSON.stringify({ orgRepo: remote }));
+  }, 30000);
+
+  afterAll(() => {
+    process.env.HOME = prevHome;
+    if (tmpHome) fs.rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it('commits and pushes an org-tagged memory to the remote', () => {
+    const key = 'org/architecture/flink-cdc';
+    writeOrgMemory('architecture/flink-cdc', { title: 'Flink CDC Pipeline', tags: ['org', 'architecture'], author: 'tester', importanceScore: 0.7 }, '## Executive Summary\n\nOutbox + CDC pattern via Flink.\n');
+    runCjs(key);
+    const tree = remoteTree();
+    expect(tree).toContain('org-vault/architecture/flink-cdc.md');
+    expect(tree).toContain('org-vault/index.json');
+  });
+
+  it('removes a memory from the remote when invoked with --delete', () => {
+    const key = 'org/decisions/adopt-kafka';
+    writeOrgMemory('decisions/adopt-kafka', { title: 'Adopt Kafka', tags: ['org'], author: 'tester' }, '## Executive Summary\n\nUse Kafka for the event bus.\n');
+    runCjs(key);
+    expect(remoteTree()).toContain('org-vault/decisions/adopt-kafka.md');
+    runCjs(key, ['--delete']);
+    expect(remoteTree()).not.toContain('org-vault/decisions/adopt-kafka.md');
+  });
+
+  it('skips (does not push) a memory that is not tagged org', () => {
+    const key = 'org/architecture/not-org-tagged';
+    writeOrgMemory('architecture/not-org-tagged', { title: 'Internal Notes', tags: ['team'], author: 'tester' }, '## Executive Summary\n\nSome notes.\n');
+    const res = runCjs(key);
+    expect(res.stdout).toContain('not tagged org');
+    expect(remoteTree()).not.toContain('org-vault/architecture/not-org-tagged.md');
+  });
+
+  it('blocks (does not push) a memory containing a non-allowlisted email', () => {
+    const key = 'org/architecture/leaky';
+    writeOrgMemory('architecture/leaky', { title: 'Leaky Doc', tags: ['org'], author: 'tester' }, '## Executive Summary\n\nContact user@gmail.com for access.\n');
+    const res = runCjs(key);
+    expect(res.stderr).toContain('Privacy filter blocked');
+    expect(remoteTree()).not.toContain('org-vault/architecture/leaky.md');
+  });
+
+  it('syncs a memory whose org tag is in a block-sequence array (older/hand-edited frontmatter)', () => {
+    // frontmatter.ts always writes arrays INLINE, so block arrays only appear in older or
+    // hand-edited files. matterParse must still extract the `org` tag from
+    //   tags:
+    //     - org
+    //     - architecture
+    // or the sync silently no-ops ("not tagged org"). This pins the .cjs parser directly
+    // (the replica unit test pins the copy) so the two cannot silently diverge.
+    const key = 'org/architecture/block-tags';
+    const body = '## Executive Summary\n\nBlock-array frontmatter doc.\n';
+    const file = path.join(orgVault, 'architecture/block-tags.md');
+    writeMkdir(file, `---\ntitle: Block Array Doc\ntags:\n  - org\n  - architecture\nauthor: tester\n---\n${body}`);
+    runCjs(key);
+    expect(remoteTree()).toContain('org-vault/architecture/block-tags.md');
+  });
+}, 60000);

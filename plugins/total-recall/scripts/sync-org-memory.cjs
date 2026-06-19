@@ -55,16 +55,31 @@ const ALLOWED_DOMAINS = Array.isArray(config.allowedEmailDomains)
 // Role titles that look like person names but are OK
 const ROLE_TITLE_ALLOWLIST = ['product owner', 'tech lead', 'architect', 'scrum master'];
 
-// With a non-empty allowlist, the negative lookahead exempts those domains.
-// With an empty allowlist we MUST drop the lookahead — `@(?!)` always fails
-// (empty matches everywhere), which would let every email through. Instead we
-// match every email so the default is fail-closed.
-const SUSPICIOUS_EMAIL_RE = ALLOWED_DOMAINS.length
-  ? new RegExp(
-      `@(?!${ALLOWED_DOMAINS.map(d => d.replace('.', '\\.')).join('|')})[a-z0-9.-]+\\.[a-z]{2,}`,
-      'i',
-    )
-  : /@[a-z0-9.-]+\.[a-z]{2,}/i;
+// Match any email-shaped substring, then compare the full host part against the
+// allowlist in JS. A single negative-lookahead regex is unsafe here: a host like
+// "yourcompany.com.evil.com" passes `@(?!yourcompany\.com)` because the lookahead
+// sees "yourcompany.com" as a *prefix* of the host and fails to exclude it — a real
+// bypass. Comparing the whole host (=== d || endsWith('.' + d)) closes it and is
+// fail-closed when the allowlist is empty (every email is non-allowlisted → blocked).
+const EMAIL_RE = /[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g;
+
+function isAllowedEmail(host, allowedDomains) {
+  if (!allowedDomains.length) return false; // fail-closed
+  const h = host.toLowerCase();
+  return allowedDomains.some(d => {
+    const dl = d.toLowerCase();
+    return h === dl || h.endsWith('.' + dl); // allow the bare domain and its subdomains
+  });
+}
+
+function findSuspiciousEmail(text, allowedDomains) {
+  EMAIL_RE.lastIndex = 0;
+  let m;
+  while ((m = EMAIL_RE.exec(text)) !== null) {
+    if (!isAllowedEmail(m[1], allowedDomains)) return m[0];
+  }
+  return null;
+}
 const PERSONAL_PRONOUN_RE = /\b(my|our|i am|i'm|we are|we're)\b/i;
 // US/NANP: optional +country code, (xxx) xxx-xxxx or xxx-xxx-xxxx
 const US_PHONE_RE = /(?:\+\d{1,3}[\s-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/;
@@ -78,7 +93,21 @@ function matterParse(raw) {
   const match = raw.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return { data: {}, content: raw };
   const data = {};
+  let lastArrayKey = null;
   for (const line of match[1].split('\n')) {
+    // Skip blank lines and comments (a "# foo" line would otherwise create a bogus
+    // array key via the "key:" branch). lastArrayKey survives blank lines so a block
+    // sequence may span them.
+    if (!line.trim() || line.trim().startsWith('#')) continue;
+    // Block sequence item belonging to the most recently opened array key: "  - value"
+    const blockItem = line.match(/^\s+-\s+(.+)$/);
+    if (blockItem) {
+      if (lastArrayKey) {
+        if (!Array.isArray(data[lastArrayKey])) data[lastArrayKey] = [];
+        data[lastArrayKey].push(blockItem[1].replace(/^["']|["']$/g, ''));
+      }
+      continue;
+    }
     const [k, ...rest] = line.split(':');
     if (k && rest.length) {
       const val = rest.join(':').trim();
@@ -88,10 +117,28 @@ function matterParse(raw) {
           const jsonSafe = val.replace(/([[\s,])([a-zA-Z0-9_-]+)(?=[,\]])/g, '$1"$2"');
           data[k.trim()] = JSON.parse(jsonSafe);
         } catch { data[k.trim()] = val; }
+        lastArrayKey = k.trim();
+      } else if (val === '') {
+        // "key:" with an empty inline value opens a block sequence (items follow as
+        // "  - x"). Preset an empty array and remember the key; if no items follow it
+        // is dropped below. Note "key:".split(':') yields rest=[''] (length 1), so THIS
+        // branch — not the !rest.length one below — is what actually catches the opener.
+        data[k.trim()] = [];
+        lastArrayKey = k.trim();
       } else {
         data[k.trim()] = val.replace(/^["']|["']$/g, '');
+        lastArrayKey = null;
       }
+    } else if (k && !rest.length) {
+      // "key:" with no inline value — opens a block array (items follow as "  - x").
+      // Preset an empty array and remember the key; if no items follow, drop it.
+      data[k.trim()] = [];
+      lastArrayKey = k.trim();
     }
+  }
+  // Drop keys preset as empty arrays that never received block items (treat as absent)
+  for (const [k, v] of Object.entries(data)) {
+    if (Array.isArray(v) && v.length === 0) delete data[k];
   }
   return { data, content: raw.slice(match[0].length).trim() };
 }
@@ -99,7 +146,7 @@ function matterParse(raw) {
 function privacyCheck(data, content) {
   const text = `${data.title ?? ''} ${content}`;
   if (SECRET_TOKEN_RE.test(text)) return 'secret token or API key detected';
-  if (SUSPICIOUS_EMAIL_RE.test(text)) return 'suspicious email address detected';
+  if (findSuspiciousEmail(text, ALLOWED_DOMAINS)) return 'suspicious email address detected';
   if (PERSONAL_PRONOUN_RE.test(data.title ?? '')) {
     const lc = (data.title ?? '').toLowerCase();
     if (!ROLE_TITLE_ALLOWLIST.some(r => lc.includes(r))) return 'personal pronoun in title';
@@ -140,98 +187,96 @@ async function main() {
 
   if (!key) { console.error('Usage: sync-org-memory.cjs <key> [--delete]'); process.exit(1); }
 
-  const filePath = path.join(PERSONAL_VAULT, key.replace(/^org\//, '') + '.md');
-  if (!deleteMode && !fs.existsSync(filePath)) {
-    console.error(`File not found: ${filePath}`); process.exit(0);
+  const relKey = key.replace(/^org\//, '');
+  const orgFile = path.join(ORG_VAULT, relKey + '.md');
+  const relFile = path.relative(ORG_VAULT_DIR, orgFile);     // e.g. org-vault/architecture/foo.md
+  const relIndex = path.relative(ORG_VAULT_DIR, path.join(ORG_VAULT, 'index.json'));
+
+  // store_memory writes org memories DIRECTLY into the org-vault working tree (which
+  // lives on the `knowledge` branch after pull-org-vault.sh runs at session start). The
+  // old code read from PERSONAL_VAULT here — where org files never live — so
+  // existsSync was always false and every org sync silently exited 0 (a no-op). Sync
+  // now commits the file that is already on disk, not a copy from personal.
+  if (!deleteMode && !fs.existsSync(orgFile)) {
+    console.error(`Org file not found: ${orgFile}`);
+    process.exit(0);
   }
 
-  let originalBranch = 'main';
+  // Keep the org-vault on the knowledge branch (its steady state). We deliberately do
+  // NOT stash or restore the original branch: store_memory writes into this working
+  // tree, so staying on knowledge means the next store lands in the right place and
+  // the next sync commits it directly. Stashing would remove the very file we commit.
   try {
-    originalBranch = git(ORG_VAULT_DIR, ['rev-parse', '--abbrev-ref', 'HEAD'], { quiet: true }).trim();
-  } catch {}
-
-  let stashed = false;
-
-  try {
-    // Stash if dirty
-    try {
-      const status = git(ORG_VAULT_DIR, ['status', '--porcelain'], { quiet: true });
-      if (status.trim()) {
-        git(ORG_VAULT_DIR, ['stash']);
-        stashed = true;
-      }
-    } catch {}
-
-    // Checkout knowledge branch
     git(ORG_VAULT_DIR, ['checkout', BRANCH], { quiet: true });
-    git(ORG_VAULT_DIR, ['pull', '--ff-only', 'origin', BRANCH], { quiet: true });
+  } catch (e) {
+    // checkout can refuse if an untracked org file clashes with a tracked one on
+    // knowledge (rare, only if the working tree drifted off knowledge). Skip rather
+    // than risk pushing from the wrong branch.
+    console.error(`Cannot switch org vault to '${BRANCH}': ${e.message}`);
+    return;
+  }
+  // Best-effort fast-forward. If it fails (e.g. an untracked-file clash with an
+  // incoming path, or the remote advanced non-ff) we still try to commit locally; the
+  // push will fail loudly if the remote has advanced, and we reset the local commit on
+  // failure so the branch stays clean for the next attempt.
+  git(ORG_VAULT_DIR, ['pull', '--ff-only', 'origin', BRANCH], { quiet: true, allowFail: true });
 
-    if (deleteMode) {
-      const orgFile = path.join(ORG_VAULT, key.replace(/^org\//, '') + '.md');
-      if (fs.existsSync(orgFile)) {
-        fs.unlinkSync(orgFile);
-        removeFromOrgIndex(key.replace(/^org\//, ''));
-        git(ORG_VAULT_DIR, ['add', '-A']);
-        git(ORG_VAULT_DIR, ['commit', '-m', `chore(total-recall): remove ${key}`], { allowFail: true });
-        try {
-          git(ORG_VAULT_DIR, ['push', 'origin', BRANCH], { quiet: true });
-        } catch (pushErr) {
-          // Undo local commit so branch stays clean
-          git(ORG_VAULT_DIR, ['reset', 'HEAD~1'], { quiet: true });
-          throw pushErr;
-        }
-      }
-    } else {
-      const raw = fs.readFileSync(filePath, 'utf8');
-      const { data, content } = matterParse(raw);
-      const tags = Array.isArray(data.tags) ? data.tags : [];
-
-      if (!tags.includes('org')) {
-        console.log(`Skipping ${key} — not tagged org`);
-        return;
-      }
-      if (tags.includes('personal')) {
-        console.error(`Rejecting ${key} — tagged both org and personal`);
-        return;
-      }
-
-      const privacyIssue = privacyCheck(data, content);
-      if (privacyIssue) {
-        console.error(`Privacy filter blocked ${key}: ${privacyIssue}`);
-        return;
-      }
-
-      const relKey = key.replace(/^org\//, '');
-      const destDir = path.join(ORG_VAULT, path.dirname(relKey));
-      fs.mkdirSync(destDir, { recursive: true });
-      const destFile = path.join(ORG_VAULT, relKey + '.md');
-      fs.copyFileSync(filePath, destFile);
-      updateOrgIndex(relKey, data, content);
-
-      git(ORG_VAULT_DIR, ['add', '-A']);
-      git(ORG_VAULT_DIR, ['commit', '-m', `chore(total-recall): sync ${key}`], { quiet: true, allowFail: true });
-      try {
-        git(ORG_VAULT_DIR, ['push', 'origin', BRANCH], { quiet: true });
-        console.log(`Synced ${key} to org vault.`);
-      } catch (pushErr) {
-        // Undo local commit so branch stays clean for next attempt
-        git(ORG_VAULT_DIR, ['reset', 'HEAD~1'], { quiet: true });
-        throw pushErr;
-      }
+  if (deleteMode) {
+    if (fs.existsSync(orgFile)) {
+      try { fs.unlinkSync(orgFile); } catch {}
     }
-  } finally {
-    // Restore original branch
+    removeFromOrgIndex(relKey);
+    git(ORG_VAULT_DIR, ['add', '--', relFile, relIndex], { quiet: true });
+    // Only commit if something actually staged (the file deletion and/or the index
+    // change). Idempotent: a repeat --delete on an already-removed key is a no-op.
+    const staged = git(ORG_VAULT_DIR, ['diff', '--cached', '--name-only'], { quiet: true, allowFail: true }).trim();
+    if (!staged) { console.log(`Nothing to delete for ${key}.`); return; }
+    git(ORG_VAULT_DIR, ['commit', '-m', `chore(total-recall): remove ${key}`], { quiet: true });
     try {
-      git(ORG_VAULT_DIR, ['checkout', originalBranch], { quiet: true });
-    } catch {}
-    // Restore stash — warn loudly if it fails (merge conflict etc.)
-    if (stashed) {
-      try {
-        git(ORG_VAULT_DIR, ['stash', 'pop'], { quiet: true });
-      } catch (e) {
-        console.error(`WARNING: git stash pop failed — your changes are in the stash. Run 'git -C ${ORG_VAULT_DIR} stash list' to inspect.`);
-      }
+      git(ORG_VAULT_DIR, ['push', 'origin', BRANCH], { quiet: true });
+      console.log(`Removed ${key} from org vault.`);
+    } catch (pushErr) {
+      // Undo exactly our commit (soft keeps the change staged for a retry). Only safe
+      // because we know HEAD advanced by one on the commit above; we never reach here
+      // if commit itself failed (it would have thrown before push).
+      git(ORG_VAULT_DIR, ['reset', '--soft', 'HEAD~1'], { quiet: true, allowFail: true });
+      throw pushErr;
     }
+    return;
+  }
+
+  // Store mode: privacy + tag checks BEFORE staging anything (never stage a file that
+  // fails — staging it would risk a later blind `git add -A` sweeping it up).
+  const raw = fs.readFileSync(orgFile, 'utf8');
+  const { data, content } = matterParse(raw);
+  const tags = Array.isArray(data.tags) ? data.tags : [];
+
+  if (!tags.includes('org')) {
+    console.log(`Skipping ${key} — not tagged org`);
+    return;
+  }
+  if (tags.includes('personal')) {
+    console.error(`Rejecting ${key} — tagged both org and personal`);
+    return;
+  }
+
+  const privacyIssue = privacyCheck(data, content);
+  if (privacyIssue) {
+    console.error(`Privacy filter blocked ${key}: ${privacyIssue}`);
+    return;
+  }
+
+  updateOrgIndex(relKey, data, content);
+  git(ORG_VAULT_DIR, ['add', '--', relFile, relIndex], { quiet: true });
+  const staged = git(ORG_VAULT_DIR, ['diff', '--cached', '--name-only'], { quiet: true, allowFail: true }).trim();
+  if (!staged) { console.log(`Nothing to sync for ${key} (already up to date).`); return; }
+  git(ORG_VAULT_DIR, ['commit', '-m', `chore(total-recall): sync ${key}`], { quiet: true });
+  try {
+    git(ORG_VAULT_DIR, ['push', 'origin', BRANCH], { quiet: true });
+    console.log(`Synced ${key} to org vault.`);
+  } catch (pushErr) {
+    git(ORG_VAULT_DIR, ['reset', '--soft', 'HEAD~1'], { quiet: true, allowFail: true });
+    throw pushErr;
   }
 }
 

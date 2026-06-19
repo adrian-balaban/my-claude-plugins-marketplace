@@ -28,6 +28,11 @@ export async function embed(text: string): Promise<number[] | null> {
   return embedder(text);
 }
 
+// Honest signal: true only once the pipeline has actually loaded. Used for
+// reporting (get_stats) so a fresh session with no optional deps installed does
+// not falsely advertise vector search as enabled. The recall hybrid gate does not
+// consult this — it always attempts embed() when hybrid is requested and degrades
+// to TF-IDF via the embed()->null path, which is what triggers the lazy load.
 export function isVectorAvailable(): boolean {
-  return pipeline !== null || !loadAttempted;
+  return pipeline !== null;
 }

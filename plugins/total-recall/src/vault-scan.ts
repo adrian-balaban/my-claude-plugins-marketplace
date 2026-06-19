@@ -13,11 +13,14 @@ import type { MemoryFrontmatter } from './types.js';
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 export function slugify(title: string): string {
-  return title
+  const slug = title
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
     .slice(0, 80);
+  // An empty/whitespace title would otherwise produce a `.md` filename and a
+  // key like `knowledge/.md`; fall back to a stable slug instead.
+  return slug || 'untitled';
 }
 
 export function keyFromPath(filePath: string, isOrg: boolean): string {
@@ -80,7 +83,7 @@ export function indexFile(filePath: string, isOrg: boolean) {
       created: fm.created ?? new Date().toISOString(),
       updated: fm.updated ?? new Date().toISOString(),
       importanceScore: fm.importanceScore ?? 0.5,
-      category: isOrg ? 'org' : deriveCategory(filePath, isOrg),
+      category: deriveCategory(filePath, isOrg),
       contentPreview: content.trim().slice(0, 500),
       accessCount: existing?.accessCount ?? 0,
       lastAccessed: existing?.lastAccessed ?? new Date().toISOString(),

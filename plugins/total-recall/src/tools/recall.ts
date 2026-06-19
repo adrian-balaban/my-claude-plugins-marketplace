@@ -6,7 +6,7 @@ import { parseRelativeDate } from '../dates.js';
 import { memIndex } from '../state.js';
 import { contentCache } from '../lru-cache.js';
 import { scheduleSave } from '../persistence.js';
-import { embed, isVectorAvailable } from '../embeddings.js';
+import { embed } from '../embeddings.js';
 import { searchVector } from '../vectorStore.js';
 import { reciprocalRankFusion } from '../rrf.js';
 
@@ -18,13 +18,20 @@ export async function recallMemory(args: any): Promise<any> {
   // inside tfidfSearch) with vector nearest-neighbour rank via Reciprocal Rank Fusion.
   // Falls back to TF-IDF only when embeddings are unavailable or the query fails to embed.
   let ranked: Array<{ key: string; score: number }>;
-  if (hybrid && isVectorAvailable()) {
+  // Always attempt the vector path when hybrid is requested; embed() returns null
+  // (and stays a cheap cached no-op) when the optional deps are absent, so this
+  // both triggers the lazy load on first use and degrades to TF-IDF gracefully.
+  if (hybrid) {
     try {
       const qvec = await embed(query);
       if (qvec) {
         const vecResults = await searchVector(VECTORS_DB, qvec, 50);
         const fused = reciprocalRankFusion([tfidfResults, vecResults]);
-        ranked = [...fused.entries()].map(([key, score]) => ({ key, score }));
+        // RRF returns a Map keyed by first-seen order (TF-IDF rank), NOT by fused
+        // score — sort by score desc before slicing so the top-N reflect the fused
+        // ranking rather than the TF-IDF insertion order.
+        ranked = [...fused.entries()].map(([key, score]) => ({ key, score }))
+          .sort((a, b) => b.score - a.score);
       } else {
         ranked = tfidfResults;
       }

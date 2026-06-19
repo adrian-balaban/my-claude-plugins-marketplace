@@ -1,12 +1,9 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-import * as cp from 'child_process';
+import { describe, it, expect } from 'vitest';
 
-// We test the matterParse, privacyCheck, and updateOrgIndex logic
-// by extracting them inline (the .cjs file can't be ES-imported cleanly).
-// These are pure/near-pure functions replicated here for unit testing.
+// We test the matterParse, privacyCheck, and email-filter logic by extracting them
+// inline (the .cjs file can't be ES-imported cleanly). These are pure functions
+// replicated here for unit testing. KEEP IN SYNC with scripts/sync-org-memory.cjs —
+// the .cjs is the source of truth; this replica exists only so vitest can exercise it.
 
 // ─── matterParse (replicated from sync-org-memory.cjs) ───────────────────────
 
@@ -14,19 +11,52 @@ function matterParse(raw: string): { data: Record<string, any>; content: string 
   const match = raw.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return { data: {}, content: raw };
   const data: Record<string, any> = {};
+  let lastArrayKey: string | null = null;
   for (const line of match[1].split('\n')) {
+    // Skip blank lines and comments (a "# foo" line would otherwise create a bogus
+    // array key via the "key:" branch). lastArrayKey survives blank lines so a block
+    // sequence may span them.
+    if (!line.trim() || line.trim().startsWith('#')) continue;
+    // Block sequence item belonging to the most recently opened array key: "  - value"
+    const blockItem = line.match(/^\s+-\s+(.+)$/);
+    if (blockItem) {
+      if (lastArrayKey) {
+        if (!Array.isArray(data[lastArrayKey])) data[lastArrayKey] = [];
+        data[lastArrayKey].push(blockItem[1].replace(/^["']|["']$/g, ''));
+      }
+      continue;
+    }
     const [k, ...rest] = line.split(':');
     if (k && rest.length) {
       const val = rest.join(':').trim();
       if (val.startsWith('[')) {
         try {
+          // Handle both JSON arrays ["a","b"] and unquoted YAML arrays [a, b, c]
           const jsonSafe = val.replace(/([[\s,])([a-zA-Z0-9_-]+)(?=[,\]])/g, '$1"$2"');
           data[k.trim()] = JSON.parse(jsonSafe);
         } catch { data[k.trim()] = val; }
+        lastArrayKey = k.trim();
+      } else if (val === '') {
+        // "key:" with an empty inline value opens a block sequence (items follow as
+        // "  - x"). Preset an empty array and remember the key; if no items follow it
+        // is dropped below. Note "key:".split(':') yields rest=[''] (length 1), so THIS
+        // branch — not the !rest.length one below — is what actually catches the opener.
+        data[k.trim()] = [];
+        lastArrayKey = k.trim();
       } else {
         data[k.trim()] = val.replace(/^["']|["']$/g, '');
+        lastArrayKey = null;
       }
+    } else if (k && !rest.length) {
+      // "key:" with no inline value — opens a block array (items follow as "  - x").
+      // Preset an empty array and remember the key; if no items follow, drop it.
+      data[k.trim()] = [];
+      lastArrayKey = k.trim();
     }
+  }
+  // Drop keys preset as empty arrays that never received block items (treat as absent)
+  for (const [k, v] of Object.entries(data)) {
+    if (Array.isArray(v) && v.length === 0) delete data[k];
   }
   return { data, content: raw.slice(match[0].length).trim() };
 }
@@ -37,16 +67,28 @@ function matterParse(raw: string): { data: Record<string, any>; content: string 
 
 const ROLE_TITLE_ALLOWLIST = ['product owner', 'tech lead', 'architect', 'scrum master'];
 
-// Build the email regex exactly as the script does, so the empty-allowlist
-// fail-closed branch is covered by tests too.
-function suspiciousEmailRegex(allowedDomains: string[]): RegExp {
-  return allowedDomains.length
-    ? new RegExp(
-        `@(?!${allowedDomains.map((d) => d.replace('.', '\\.')).join('|')})[a-z0-9.-]+\\.[a-z]{2,}`,
-        'i',
-      )
-    : /@[a-z0-9.-]+\.[a-z]{2,}/i;
+// Match any email-shaped substring, then compare the full host part against the
+// allowlist in JS (NOT a negative-lookahead regex — see the bypass test below).
+const EMAIL_RE = /[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g;
+
+function isAllowedEmail(host: string, allowedDomains: string[]): boolean {
+  if (!allowedDomains.length) return false; // fail-closed
+  const h = host.toLowerCase();
+  return allowedDomains.some((d) => {
+    const dl = d.toLowerCase();
+    return h === dl || h.endsWith('.' + dl); // allow the bare domain and its subdomains
+  });
 }
+
+function findSuspiciousEmail(text: string, allowedDomains: string[]): string | null {
+  EMAIL_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = EMAIL_RE.exec(text)) !== null) {
+    if (!isAllowedEmail(m[1], allowedDomains)) return m[0];
+  }
+  return null;
+}
+
 const PERSONAL_PRONOUN_RE = /\b(my|our|i am|i'm|we are|we're)\b/i;
 // US/NANP: optional +country code, (xxx) xxx-xxxx or xxx-xxx-xxxx
 const US_PHONE_RE = /(?:\+\d{1,3}[\s-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/;
@@ -59,7 +101,7 @@ const SECRET_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|gh[opsu]_[A
 function privacyCheck(data: any, content: string, allowedDomains: string[] = []): string | null {
   const text = `${data.title ?? ''} ${content}`;
   if (SECRET_TOKEN_RE.test(text)) return 'secret token or API key detected';
-  if (suspiciousEmailRegex(allowedDomains).test(text)) return 'suspicious email address detected';
+  if (findSuspiciousEmail(text, allowedDomains)) return 'suspicious email address detected';
   if (PERSONAL_PRONOUN_RE.test(data.title ?? '')) {
     const lc = (data.title ?? '').toLowerCase();
     if (!ROLE_TITLE_ALLOWLIST.some((r: string) => lc.includes(r))) return 'personal pronoun in title';
@@ -124,6 +166,37 @@ describe('matterParse', () => {
     const { data } = matterParse(raw);
     expect(data).toEqual({});
   });
+
+  it('parses block-sequence arrays (older/hand-edited files)', () => {
+    // store_memory writes arrays inline, but older files (and hand-edited YAML) use
+    // the block form. matterParse must attach each "  - x" to the preceding array key.
+    const raw = `---\ntags:\n  - org\n  - team\n---\n\nContent`;
+    const { data, content } = matterParse(raw);
+    expect(data.tags).toEqual(['org', 'team']);
+    expect(content).toBe('Content');
+  });
+
+  it('parses block-sequence arrays with quoted items', () => {
+    const raw = `---\ntags:\n  - "org"\n  - 'architecture'\n---\n\nContent`;
+    const { data } = matterParse(raw);
+    expect(data.tags).toEqual(['org', 'architecture']);
+  });
+
+  it('drops a "key:" that opens a block array but receives no items', () => {
+    // A bare "tags:" with nothing under it must NOT leave data.tags === [] — treat absent.
+    const raw = `---\ntags:\n---\n\nContent`;
+    const { data } = matterParse(raw);
+    expect(data.tags).toBeUndefined();
+    expect(data).toEqual({});
+  });
+
+  it('does not attach a block item to a key that already took an inline value', () => {
+    // An orphan "  - x" after a scalar key is ignored, not silently attached.
+    const raw = `---\ntitle: Foo\n  - stray\n---\n\nContent`;
+    const { data } = matterParse(raw);
+    expect(data.title).toBe('Foo');
+    expect(data).toEqual({ title: 'Foo' });
+  });
 });
 
 // ─── Tests: privacyCheck ─────────────────────────────────────────────────────
@@ -150,6 +223,19 @@ describe('privacyCheck', () => {
 
   it('still blocks non-allowlisted domains when an allowlist is set', () => {
     expect(privacyCheck({ title: 'Notes' }, 'Contact user@gmail.com for details.', ['mycompany.com'])).toMatch(/email/);
+  });
+
+  it('blocks a lookalike host that merely ends with the allowed domain as a prefix (regex-lookahead bypass)', () => {
+    // A negative-lookahead regex @(?!yourcompany\.com) would let this through because
+    // "yourcompany.com" is a PREFIX of the host "yourcompany.com.evil.com" — the
+    // lookahead sees the prefix and fails to exclude the rest. The JS host comparison
+    // treats the host as a whole and correctly blocks it.
+    expect(privacyCheck({ title: 'Notes' }, 'Reach ops@yourcompany.com.evil.com', ['yourcompany.com'])).toMatch(/email/);
+  });
+
+  it('allows subdomains of a configured allowed domain', () => {
+    // team.yourcompany.com is a subdomain of the allowed yourcompany.com → safe.
+    expect(privacyCheck({ title: 'Notes' }, 'Reach ops@team.yourcompany.com', ['yourcompany.com'])).toBeNull();
   });
 
   it('blocks personal pronoun in title', () => {

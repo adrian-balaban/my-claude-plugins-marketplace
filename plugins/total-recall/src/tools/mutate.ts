@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as os from 'os';
-import { parseFrontmatter, stringifyFrontmatter } from '../frontmatter.js';
+import { parseFrontmatter, stringifyFrontmatter, withExecutiveSummary } from '../frontmatter.js';
 import { VECTORS_DB } from '../paths.js';
 import { reconcileIndex } from '../vault-scan.js';
 import { rebuildInvertedIndex } from '../tfidf.js';
@@ -39,7 +39,10 @@ export function updateMemory(args: any): any {
     sessions,
   };
 
-  const newContent = content ?? parsed.content;
+  // When new content is supplied, normalize it to begin with the Executive Summary
+  // header (idempotent), matching what store_memory writes and what parseFrontmatter
+  // yields on the read path — so contentPreview stays consistent with disk.
+  const newContent = content ? withExecutiveSummary(content) : parsed.content;
   fs.writeFileSync(meta.filePath, stringifyFrontmatter(newContent, newFm));
 
   Object.assign(meta, {
@@ -67,7 +70,11 @@ export function deleteMemory(args: any): any {
   const meta = memIndex[key];
   if (!meta) throw new Error(`Memory not found: ${key}`);
 
-  fs.unlinkSync(meta.filePath);
+  // If the file was already removed (a repeated delete, or an external removal
+  // since the index was loaded), unlinkSync would throw and abort the in-memory
+  // cleanup. Swallow the fs error and still drop the index/vector/cache entries so
+  // the key is gone regardless of on-disk state.
+  try { fs.unlinkSync(meta.filePath); } catch {}
   delete memIndex[key];
   contentCache.delete(key);
   deleteVector(VECTORS_DB, key).catch(() => {});

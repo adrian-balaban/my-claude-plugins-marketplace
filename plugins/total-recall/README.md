@@ -15,7 +15,7 @@ Two separate vaults live under `~/.total-recall/`:
 | Personal | `~/.total-recall/personal/` | Default for all memories |
 | Org | `~/.total-recall/org/org-vault/` | When tagged `org` |
 
-The org vault syncs to a remote git repo (`orgRepo` in `~/.total-recall/config.json`, branch `knowledge`) via a privacy filter that strips secrets, emails, personal pronouns, and phone numbers before any push.
+The org vault syncs to a remote git repo (`orgRepo` in `~/.total-recall/config.json`, branch `knowledge`) via a privacy filter that blocks secret tokens, email addresses, personal pronouns (in the title only), and phone numbers before any push.
 
 ### The 12 MCP Tools
 

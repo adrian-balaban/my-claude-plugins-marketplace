@@ -27,8 +27,16 @@ export function getMemoriesByKeys(args: any): any {
     meta.lastAccessed = new Date().toISOString();
     scheduleSave();
     if (summary) {
-      const raw = fs.readFileSync(meta.filePath, 'utf8');
-      const { content } = parseFrontmatter(raw);
+      // Guard the read like the full-content path does: if the file vanished between
+      // index load and this read, surface a per-key error rather than crashing the
+      // whole batch.
+      let content = '';
+      try {
+        const raw = fs.readFileSync(meta.filePath, 'utf8');
+        content = parseFrontmatter(raw).content;
+      } catch {
+        return { key, error: 'Failed to read memory file' };
+      }
       const execSummary = content.match(/## Executive Summary\n+([\s\S]{0,500})/)?.[1] ?? content.slice(0, 500);
       return { key, title: meta.title, category: meta.category, tags: meta.tags, summary: execSummary.trim() };
     }

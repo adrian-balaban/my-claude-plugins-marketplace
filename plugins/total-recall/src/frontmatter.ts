@@ -35,6 +35,17 @@ export function stringifyFrontmatter(content: string, data: object): string {
   return `---\n${lines.join('\n')}\n---\n${content}`;
 }
 
+// Ensure a memory body begins with a "## Executive Summary" section. Idempotent:
+// if the content already starts with that header, leave it as-is (avoids doubling
+// it when a caller passes content that already includes the heading). Returns the
+// body string to hand to stringifyFrontmatter — leading newline included so the
+// on-disk body matches what parseFrontmatter(content) yields on the read path.
+export function withExecutiveSummary(content: string): string {
+  return content.trimStart().startsWith('## Executive Summary')
+    ? `\n${content.trimStart()}`
+    : `\n## Executive Summary\n\n${content}`;
+}
+
 // ─── parse ───────────────────────────────────────────────────────────────────
 
 function unquote(s: string): string {
