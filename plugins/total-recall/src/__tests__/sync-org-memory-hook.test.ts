@@ -30,7 +30,10 @@ process.exit(0);
 function has(bin: string): boolean {
   return spawnSync(bin, ['--version'], { stdio: 'ignore' }).status === 0;
 }
-const OK = has('bash') && has('python3') && has('flock') && has('node');
+// The hook parses its stdin JSON via `node` (ported from python3), so the only
+// runtime deps are bash + flock + node — NOT python3. Requiring python3 here
+// would wrongly skip the test on python3-less systems, where the hook now works.
+const OK = has('bash') && has('flock') && has('node');
 
 let fakeRoot: string;
 let tmpHome: string;
