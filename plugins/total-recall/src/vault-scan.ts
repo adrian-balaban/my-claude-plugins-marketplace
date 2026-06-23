@@ -79,7 +79,15 @@ export function indexFile(filePath: string, isOrg: boolean) {
     memIndex[key] = {
       key,
       filePath,
-      title: fm.title ?? path.basename(filePath, '.md'),
+      // Coerce title to a string: a hand-edited (or teammate-pushed, via the shared
+      // org vault) frontmatter with an UNQUOTED numeric title (`title: 2026`) is
+      // parsed by coerceScalar into a Number. That would later crash tfidfSearch's
+      // `meta.title.toLowerCase()` and buildIndexCache's `m.title.slice()` (the
+      // latter in a debounced timer → uncaught throw → process crash). The writer
+      // always quotes numeric-looking titles, so this only affects externally
+      // authored files — but the threat model is the same as the frontmatter-key
+      // ReDoS hardening (teammate-pushed malformed frontmatter).
+      title: String(fm.title ?? path.basename(filePath, '.md')),
       tags: fm.tags ?? [],
       author: fm.author,
       sessions: fm.sessions ?? [],

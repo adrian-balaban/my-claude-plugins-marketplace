@@ -870,6 +870,28 @@ describe('index cache build (more than 3 tags)', () => {
   });
 });
 
+// ─── indexFile: numeric title robustness ───────────────────────────────────────
+
+describe('indexFile — unquoted numeric title (hand-edited frontmatter)', () => {
+  it('coerces a numeric title to string so tfidfSearch does not crash', async () => {
+    // Externally-authored frontmatter with an UNQUOTED numeric title. coerceScalar
+    // parses `2026` as a Number; without String() coercion in indexFile this would
+    // crash tfidfSearch's `meta.title.toLowerCase()` (Number has no toLowerCase).
+    const dir = path.join(VAULT, 'personal-vault', 'knowledge');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'numeric-title.md'),
+      `---\ntitle: 2026\ntags: []\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nimportanceScore: 0.5\n---\n\nYear note.\n`
+    );
+    await callTool('rebuild_index');
+    const res = await callTool('search_index', { query: '2026' });
+    expect(res.isError).not.toBe(true);
+    const found = result(res).find((m: any) => typeof m.title === 'string' && m.title.includes('2026'));
+    expect(found).toBeDefined();
+    expect(typeof found!.title).toBe('string');
+  });
+});
+
 // ─── store_memory: existing key without force → error ────────────────────────
 
 describe('store_memory — duplicate key protection', () => {
