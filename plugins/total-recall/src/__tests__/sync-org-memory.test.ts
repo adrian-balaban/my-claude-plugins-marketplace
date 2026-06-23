@@ -99,7 +99,13 @@ const PHONE_RE = new RegExp(`(?:${INTL_PHONE_RE.source}|${US_PHONE_RE.source})`)
 const SECRET_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|gh[opsu]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})\b/;
 
 function privacyCheck(data: any, content: string, allowedDomains: string[] = []): string | null {
-  const text = `${data.title ?? ''} ${content}`;
+  // Scan the union of title, author, tags, and body — mirrors scripts/sync-org-memory.cjs.
+  // Tags are scanned whether they parsed as an array OR as a raw scalar string: the
+  // TS writer always emits arrays, but a teammate-pushed/hand-edited memory may carry
+  // `tags: ghp_xxx` (scalar), which parses to a string and would be skipped by the
+  // array branch alone (tagText=''), letting a scalar-tag secret sail into the org repo.
+  const tagText = Array.isArray(data.tags) ? data.tags.join(' ') : String(data.tags ?? '');
+  const text = `${data.title ?? ''} ${data.author ?? ''} ${tagText} ${content}`;
   if (SECRET_TOKEN_RE.test(text)) return 'secret token or API key detected';
   if (findSuspiciousEmail(text, allowedDomains)) return 'suspicious email address detected';
   if (PERSONAL_PRONOUN_RE.test(data.title ?? '')) {
@@ -262,6 +268,36 @@ describe('privacyCheck', () => {
 
   it('blocks "we are" pronoun in title', () => {
     expect(privacyCheck({ title: "We are migrating" }, 'Content')).toMatch(/pronoun/);
+  });
+
+  // ── author & tags scanning (regression tests keeping the replica in sync with
+  // the .cjs, which scans title + author + tags + body). Without author/tags in the
+  // scanned `text`, a secret or email smuggled into those fields would sail through.
+
+  it('blocks a secret token in the author field', () => {
+    // The .cjs scans data.author; if the replica omits it, this passes when it shouldn't.
+    expect(privacyCheck({ author: 'sk-abcdefghijklmnopqrstuvwxyz123456' }, 'Clean body.')).toMatch(/secret/);
+  });
+
+  it('blocks a suspicious email in the author field', () => {
+    expect(privacyCheck({ author: 'leaker@gmail.com' }, 'Clean body.')).toMatch(/email/);
+  });
+
+  it('blocks a secret token in an array tags field', () => {
+    expect(privacyCheck({ tags: ['org', 'sk-abcdefghijklmnopqrstuvwxyz123456'] }, 'Clean body.')).toMatch(/secret/);
+  });
+
+  it('blocks a secret token in a SCALAR tags field (teammate-pushed malformed frontmatter)', () => {
+    // The TS writer always emits tags as an array, but a hand-edited or teammate-pushed
+    // memory may carry `tags: sk-xxx` as a scalar. matterParse yields a string, not an
+    // array, so the Array.isArray branch alone would set tagText='' and leave the
+    // scalar tag unscanned. The String(data.tags ?? '') fallback closes that gap.
+    expect(privacyCheck({ tags: 'sk-abcdefghijklmnopqrstuvwxyz123456' }, 'Clean body.')).toMatch(/secret/);
+  });
+
+  it('still passes a clean scalar tags field', () => {
+    // A non-secret scalar tag must not false-positive.
+    expect(privacyCheck({ tags: 'architecture' }, 'Clean body.')).toBeNull();
   });
 });
 

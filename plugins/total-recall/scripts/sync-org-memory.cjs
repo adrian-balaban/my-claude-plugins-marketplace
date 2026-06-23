@@ -149,7 +149,16 @@ function privacyCheck(data, content) {
   // Scan the union of title, author, tags, and body. Previously only title+body
   // were scanned, so a secret or personal email smuggled into the `tags` array or
   // the `author` field would sail past the filter into the shared org repo.
-  const tagText = Array.isArray(data.tags) ? data.tags.join(' ') : '';
+  // Scan tags whether they parsed as an array OR as a raw scalar string. The TS
+  // writer (frontmatter.ts) always emits tags as an array, so a legitimately-stored
+  // memory has data.tags === string[]. But this gate's threat model includes
+  // teammate-pushed / hand-edited frontmatter (same model as the escapeRegExp
+  // ReDoS hardening and the numeric-title String() coercion): a scalar
+  // `tags: ghp_xxxxxxxx` (not `tags: [ghp_xxx]`) parses to a string, not an array,
+  // and the array branch alone would set tagText='' — leaving a secret smuggled
+  // into a scalar tag unscanned so it sails into the shared org repo. Scanning the
+  // raw string form is fail-closed: more text scanned, never less.
+  const tagText = Array.isArray(data.tags) ? data.tags.join(' ') : String(data.tags ?? '');
   const text = `${data.title ?? ''} ${data.author ?? ''} ${tagText} ${content}`;
   if (SECRET_TOKEN_RE.test(text)) return 'secret token or API key detected';
   if (findSuspiciousEmail(text, ALLOWED_DOMAINS)) return 'suspicious email address detected';
