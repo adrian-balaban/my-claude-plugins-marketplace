@@ -6,6 +6,20 @@ PERSONAL_VAULT="$HOME/.total-recall/personal-vault"
 ORG_VAULT="$HOME/.total-recall/org/org-vault"
 CACHE="$HOME/.total-recall/.index-cache.txt"
 
+# Must stay in sync with EXCLUDED_DIRS in src/paths.ts — these directories are
+# skipped by the TS reconcileIndex walk, and the cache builder must skip them
+# too or it injects hidden memories (e.g. .obsidian, projects, templates) into
+# the SessionStart index that the MCP tools never surface.
+EXCLUDED_DIRS='projects templates .obsidian reference-docs in-progress completed'
+
+# Build a find prune clause: \( -name projects -o -name templates -o ... \) -prune
+# Names are simple tokens (no spaces/glob metachars), so unquoted word-splitting of
+# $PRUNE into the find expression is safe and intentional.
+PRUNE=""
+for d in $EXCLUDED_DIRS; do
+  if [ -z "$PRUNE" ]; then PRUNE="-name $d"; else PRUNE="$PRUNE -o -name $d"; fi
+done
+
 TMP=$(mktemp)
 COUNT=0
 
@@ -38,7 +52,7 @@ process_vault() {
 
     echo "- $key: $title [$tags_short] ($category)" >> "$TMP"
     COUNT=$((COUNT + 1))
-  done < <(find "$base" -name "*.md" -print0 2>/dev/null)
+  done < <(find "$base" -type d \( $PRUNE \) -prune -o -name '*.md' -print0 2>/dev/null)
 }
 
 process_vault "$PERSONAL_VAULT" ""

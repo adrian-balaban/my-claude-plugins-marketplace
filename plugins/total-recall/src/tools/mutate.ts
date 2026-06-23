@@ -21,10 +21,14 @@ export function updateMemory(args: any): any {
   const now = new Date().toISOString();
 
   // Org memories are author-protected, mirroring store_memory's guard.
+  // Fail-closed: a missing author on an existing org memory is treated as
+  // foreign (not silently overwritable), so a caller can't bypass the guard on
+  // a legacy/untagged file. Matches store_memory's `existingFm.author !==
+  // effectiveAuthor` check.
   if (meta.isOrg) {
     const existingAuthor = (parsed.data as Partial<MemoryFrontmatter>).author;
-    if (existingAuthor && existingAuthor !== os.userInfo().username) {
-      throw new Error(`Cannot update org memory authored by ${existingAuthor}.`);
+    if (existingAuthor !== os.userInfo().username) {
+      throw new Error(`Cannot update org memory authored by ${existingAuthor ?? '(unknown)'}.`);
     }
   }
 

@@ -823,6 +823,20 @@ describe('get_related_memories — sort comparator and zero-score filter', () =>
     expect(perfectScore).toBeGreaterThan(partialScore);
     expect(res.find((m: any) => m.title === 'NoMatch')).toBeUndefined();
   });
+
+  it('does not leak same-category memories with zero tag overlap', async () => {
+    // Source: tags=[kafka], category=architecture
+    // Sibling: tags=[postgres] (disjoint), category=architecture (same category)
+    // The same-category boost must not turn a zero-overlap memory into a "related"
+    // one — it should be filtered out, same as a cross-category zero-overlap.
+    await callTool('store_memory', { title: 'ArchSrc', content: 'X', tags: ['kafka'], category: 'architecture' });
+    await callTool('store_memory', { title: 'ArchSibling', content: 'X', tags: ['postgres'], category: 'architecture' });
+    const list = result(await callTool('list_memories'));
+    const srcKey = list.find((m: any) => m.title === 'ArchSrc')?.key;
+    if (!srcKey) return;
+    const res = result(await callTool('get_related_memories', { key: srcKey }));
+    expect(res.find((m: any) => m.title === 'ArchSibling')).toBeUndefined();
+  });
 });
 
 describe('excluded directories', () => {
@@ -896,6 +910,24 @@ describe('update_memory — org author protection', () => {
     const res = await callTool('update_memory', { key, content: 'Hacked' });
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toContain('other-person');
+  });
+
+  it('returns error when updating org memory with a missing author (fail-closed)', async () => {
+    // Legacy org memory written before the author field existed — no author.
+    // Fail-closed: it must NOT be silently overwritable by the current user.
+    const orgDir = path.join(VAULT, 'org', 'org-vault', 'decisions');
+    fs.mkdirSync(orgDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(orgDir, 'no-author-org.md'),
+      `---\ntitle: "No Author Org"\ntags: [org]\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nimportanceScore: 0.5\n---\n\nContent.\n`
+    );
+    await callTool('rebuild_index');
+    const list = result(await callTool('list_memories'));
+    const key = list.find((m: any) => m.title === 'No Author Org')?.key;
+    if (!key) return;
+    const res = await callTool('update_memory', { key, content: 'Hacked' });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('(unknown)');
   });
 });
 

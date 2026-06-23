@@ -62,6 +62,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LOCK="$HOME/.total-recall/org/.sync.lock"
+SYNC_LOG="$HOME/.total-recall/org/.sync.log"
 mkdir -p "$(dirname "$LOCK")"
 
 # Run the git sync under an exclusive flock so concurrent PostToolUse invocations
@@ -69,18 +70,26 @@ mkdir -p "$(dirname "$LOCK")"
 # flock blocks, but the whole subshell is backgrounded so the hook never blocks the
 # session; queued syncs simply run one after another and no key's sync is dropped.
 # build-memory-index only writes the local cache file, so it stays outside the lock.
+#
+# The backgrounded subshell inherits fd 1 (this hook's stdout pipe to Claude Code).
+# Without a redirect, the node child's console.log lines append to the hook's
+# `{"continue":true}` JSON AFTER it is emitted — the pipe stays open until the
+# backgrounded child exits, so Claude Code reads the extra lines and may fail to
+# parse the hook output. Redirect the backgrounded children's stdout+stderr to a
+# log file so the hook emits exactly one clean JSON line and the sync output is
+# still discoverable at ~/.total-recall/org/.sync.log.
 if [ "$DELETE_FLAG" = "1" ]; then
   (
     flock -x 9
     node "$PLUGIN_ROOT/scripts/sync-org-memory.cjs" "$KEY" --delete
-  ) 9>"$LOCK" &
+  ) 9>"$LOCK" >>"$SYNC_LOG" 2>&1 &
 else
   (
     flock -x 9
     node "$PLUGIN_ROOT/scripts/sync-org-memory.cjs" "$KEY"
-  ) 9>"$LOCK" &
+  ) 9>"$LOCK" >>"$SYNC_LOG" 2>&1 &
 fi
 
-bash "$PLUGIN_ROOT/hooks/scripts/build-memory-index.sh" &
+bash "$PLUGIN_ROOT/hooks/scripts/build-memory-index.sh" >>"$SYNC_LOG" 2>&1 &
 
 echo '{"continue":true}'

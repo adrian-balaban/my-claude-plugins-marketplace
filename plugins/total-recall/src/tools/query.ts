@@ -89,10 +89,16 @@ export function getRelatedMemories(args: any): any {
     .filter(m => m.key !== key)
     .map(m => {
       const shared = m.tags.filter(t => srcTags.has(t)).length;
+      // Jaccard similarity on TAGS with a same-category boost. A memory with no
+      // shared tags is not "related" — the same-category boost must amplify an
+      // existing tag overlap, not manufacture a relation from nothing. Without
+      // this guard, every same-category memory with disjoint tags leaks in at
+      // score 0.2 (0 Jaccard + 0.2 boost).
+      if (shared === 0) return null;
       const categoryBoost = m.category === source.category ? 0.2 : 0;
       return { key: m.key, title: m.title, category: m.category, tags: m.tags, score: shared / (srcTags.size + m.tags.length - shared) + categoryBoost };
     })
-    .filter(m => m.score > 0)
+    .filter((m): m is NonNullable<typeof m> => m !== null)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 }

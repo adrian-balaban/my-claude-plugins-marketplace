@@ -5,8 +5,8 @@
   "author": {
     "name": "Adrian Balaban"
   },
-  "homepage": "https://github.com/adrian-balaban/my-claude-plugins/tree/main/plugins/total-recall",
-  "repository": "https://github.com/adrian-balaban/my-claude-plugins",
+  "homepage": "https://github.com/adrian-balaban/my-claude-plugins-marketplace/tree/main/plugins/total-recall",
+  "repository": "https://github.com/adrian-balaban/my-claude-plugins-marketplace",
   "license": "MIT",
   "keywords": ["memory", "knowledge", "mcp", "productivity"],
   "mcpServers": "./.mcp.json"

@@ -16207,9 +16207,10 @@ function getRelatedMemories(args) {
   const srcTags = new Set(source.tags);
   return Object.values(memIndex).filter((m) => m.key !== key).map((m) => {
     const shared = m.tags.filter((t) => srcTags.has(t)).length;
+    if (shared === 0) return null;
     const categoryBoost = m.category === source.category ? 0.2 : 0;
     return { key: m.key, title: m.title, category: m.category, tags: m.tags, score: shared / (srcTags.size + m.tags.length - shared) + categoryBoost };
-  }).filter((m) => m.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
+  }).filter((m) => m !== null).sort((a, b) => b.score - a.score).slice(0, limit);
 }
 function pruneMemories(args) {
   const { threshold = 0.1, limit = 20 } = args;
@@ -16235,8 +16236,8 @@ function updateMemory(args) {
   const now = (/* @__PURE__ */ new Date()).toISOString();
   if (meta2.isOrg) {
     const existingAuthor = parsed.data.author;
-    if (existingAuthor && existingAuthor !== os3.userInfo().username) {
-      throw new Error(`Cannot update org memory authored by ${existingAuthor}.`);
+    if (existingAuthor !== os3.userInfo().username) {
+      throw new Error(`Cannot update org memory authored by ${existingAuthor ?? "(unknown)"}.`);
     }
   }
   const prevSessions = Array.isArray(parsed.data.sessions) ? parsed.data.sessions : [];
