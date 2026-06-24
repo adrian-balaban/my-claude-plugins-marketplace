@@ -238,6 +238,12 @@ describe('recall_memory', () => {
     expect(res.length).toBeGreaterThan(0);
   });
 
+  it('respects before (exclusive upper bound on updated)', async () => {
+    // A past `before` (epoch) excludes the fresh memory; a far-future one keeps it.
+    expect(result(await callTool('recall_memory', { query: 'kafka', before: '1970-01-01' })).length).toBe(0);
+    expect(result(await callTool('recall_memory', { query: 'kafka', before: '2999-01-01' })).length).toBeGreaterThan(0);
+  });
+
   it('returns no results for unknown query', async () => {
     const res = result(await callTool('recall_memory', { query: 'zzznomatch' }));
     expect(res.length).toBe(0);
@@ -371,6 +377,11 @@ describe('search_index', () => {
     expect(res.length).toBeGreaterThan(0); // fresh memory passes 1-day filter
   });
 
+  it('respects before (exclusive upper bound on updated)', async () => {
+    expect(result(await callTool('search_index', { query: 'flink', before: '1970-01-01' })).length).toBe(0);
+    expect(result(await callTool('search_index', { query: 'flink', before: '2999-01-01' })).length).toBeGreaterThan(0);
+  });
+
   it('respects limit', async () => {
     const res = result(await callTool('search_index', { query: 'flink', limit: 1 }));
     expect(res.length).toBeLessThanOrEqual(1);
@@ -486,6 +497,11 @@ describe('get_timeline', () => {
   it('filters by since (relative)', async () => {
     const res = result(await callTool('get_timeline', { since: '7d' }));
     expect(res.length).toBeGreaterThan(0);
+  });
+
+  it('respects before (exclusive upper bound on updated)', async () => {
+    expect(result(await callTool('get_timeline', { before: '1970-01-01' })).length).toBe(0);
+    expect(result(await callTool('get_timeline', { before: '2999-01-01' })).length).toBeGreaterThan(0);
   });
 
   it('respects limit', async () => {

@@ -11,7 +11,7 @@ import { searchVector } from '../vectorStore.js';
 import { reciprocalRankFusion } from '../rrf.js';
 
 export async function recallMemory(args: any): Promise<any> {
-  const { query, full = false, since, limit = 10, excludeJournal = true, hybrid = true } = args;
+  const { query, full = false, since, before, limit = 10, excludeJournal = true, hybrid = true } = args;
   const tfidfResults = tfidfSearch(query, excludeJournal);
 
   // Optional hybrid path: fuse the TF-IDF rank (already decay-weighted by Ebbinghaus
@@ -59,6 +59,16 @@ export async function recallMemory(args: any): Promise<any> {
       return updated ? new Date(updated) >= cutoff : false;
     });
   }
+  // Symmetric upper bound (mirrors `since`): a relative ("2d") or ISO date; only
+  // memories updated strictly before it are kept. With `since` this gives a
+  // date-range query (e.g. "last week but not today") without a return-shape change.
+  if (before) {
+    const cutoff = parseRelativeDate(before) ?? new Date(before);
+    ranked = ranked.filter(r => {
+      const updated = memIndex[r.key]?.updated;
+      return updated ? new Date(updated) < cutoff : false;
+    });
+  }
 
   ranked = ranked.slice(0, limit);
 
@@ -87,7 +97,7 @@ export async function recallMemory(args: any): Promise<any> {
 }
 
 export function searchIndex(args: any): any {
-  const { query, limit = 20, since, category, tags: filterTags } = args;
+  const { query, limit = 20, since, before, category, tags: filterTags } = args;
   let results = tfidfSearch(query);
 
   if (since) {
@@ -95,6 +105,14 @@ export function searchIndex(args: any): any {
     results = results.filter(r => {
       const updated = memIndex[r.key]?.updated;
       return updated ? new Date(updated) >= cutoff : false;
+    });
+  }
+  // Symmetric upper bound — mirrors `since`; combine for a date-range query.
+  if (before) {
+    const cutoff = parseRelativeDate(before) ?? new Date(before);
+    results = results.filter(r => {
+      const updated = memIndex[r.key]?.updated;
+      return updated ? new Date(updated) < cutoff : false;
     });
   }
   if (category) results = results.filter(r => memIndex[r.key]?.category === category);

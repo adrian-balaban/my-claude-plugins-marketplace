@@ -67,7 +67,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           query: { type: 'string' },
           full: { type: 'boolean', default: false },
-          since: { type: 'string', description: 'Relative (7d, 2w, 1m) or ISO date.' },
+          since: { type: 'string', description: 'Relative (7d, 2w, 1m) or ISO date. Lower bound on updated.' },
+          before: { type: 'string', description: 'Relative (7d, 2w, 1m) or ISO date. Upper bound on updated (exclusive); combine with since for a date range.' },
           limit: { type: 'number', default: 10 },
           excludeJournal: { type: 'boolean', default: true },
           hybrid: { type: 'boolean', default: true, description: 'Fuse TF-IDF with vector search (RRF) when available.' },
@@ -124,7 +125,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           query: { type: 'string' },
           limit: { type: 'number', default: 20 },
-          since: { type: 'string' },
+          since: { type: 'string', description: 'Relative or ISO date. Lower bound on updated.' },
+          before: { type: 'string', description: 'Relative or ISO date. Upper bound on updated (exclusive); combine with since for a date range.' },
           category: { type: 'string' },
           tags: { type: 'array', items: { type: 'string' } },
         },
@@ -154,7 +156,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: 'object',
         properties: {
-          since: { type: 'string' },
+          since: { type: 'string', description: 'Relative or ISO date. Lower bound on updated.' },
+          before: { type: 'string', description: 'Relative or ISO date. Upper bound on updated (exclusive); combine with since for a date range.' },
           limit: { type: 'number', default: 50 },
           category: { type: 'string' },
         },

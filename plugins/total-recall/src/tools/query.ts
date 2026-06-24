@@ -73,10 +73,12 @@ export function getStats(): any {
 }
 
 export function getTimeline(args: any): any {
-  const { since, limit = 50, category } = args;
+  const { since, before, limit = 50, category } = args;
   const cutoff = since ? (parseRelativeDate(since) ?? new Date(since)) : new Date(0);
+  // Symmetric upper bound — mirrors `since`; combine for a date-range window.
+  const upper = before ? (parseRelativeDate(before) ?? new Date(before)) : null;
   return Object.values(memIndex)
-    .filter(m => new Date(m.updated) >= cutoff && (!category || m.category === category))
+    .filter(m => new Date(m.updated) >= cutoff && (!upper || new Date(m.updated) < upper) && (!category || m.category === category))
     .sort((a, b) => new Date(b.updated).getTime() - new Date(a.updated).getTime())
     .slice(0, limit)
     .map(m => ({ key: m.key, title: m.title, category: m.category, tags: m.tags, updated: m.updated }));

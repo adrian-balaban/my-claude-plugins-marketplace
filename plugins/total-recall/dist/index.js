@@ -16071,7 +16071,7 @@ function reciprocalRankFusion(lists, k = 60) {
 
 // src/tools/recall.ts
 async function recallMemory(args) {
-  const { query, full = false, since, limit = 10, excludeJournal = true, hybrid = true } = args;
+  const { query, full = false, since, before, limit = 10, excludeJournal = true, hybrid = true } = args;
   const tfidfResults = tfidfSearch(query, excludeJournal);
   let ranked;
   if (hybrid) {
@@ -16100,6 +16100,13 @@ async function recallMemory(args) {
       return updated ? new Date(updated) >= cutoff : false;
     });
   }
+  if (before) {
+    const cutoff = parseRelativeDate(before) ?? new Date(before);
+    ranked = ranked.filter((r) => {
+      const updated = memIndex[r.key]?.updated;
+      return updated ? new Date(updated) < cutoff : false;
+    });
+  }
   ranked = ranked.slice(0, limit);
   return ranked.map((r) => {
     const meta2 = memIndex[r.key];
@@ -16124,13 +16131,20 @@ async function recallMemory(args) {
   }).filter(Boolean);
 }
 function searchIndex(args) {
-  const { query, limit = 20, since, category, tags: filterTags } = args;
+  const { query, limit = 20, since, before, category, tags: filterTags } = args;
   let results = tfidfSearch(query);
   if (since) {
     const cutoff = parseRelativeDate(since) ?? new Date(since);
     results = results.filter((r) => {
       const updated = memIndex[r.key]?.updated;
       return updated ? new Date(updated) >= cutoff : false;
+    });
+  }
+  if (before) {
+    const cutoff = parseRelativeDate(before) ?? new Date(before);
+    results = results.filter((r) => {
+      const updated = memIndex[r.key]?.updated;
+      return updated ? new Date(updated) < cutoff : false;
     });
   }
   if (category) results = results.filter((r) => memIndex[r.key]?.category === category);
@@ -16204,9 +16218,10 @@ function getStats() {
   };
 }
 function getTimeline(args) {
-  const { since, limit = 50, category } = args;
+  const { since, before, limit = 50, category } = args;
   const cutoff = since ? parseRelativeDate(since) ?? new Date(since) : /* @__PURE__ */ new Date(0);
-  return Object.values(memIndex).filter((m) => new Date(m.updated) >= cutoff && (!category || m.category === category)).sort((a, b) => new Date(b.updated).getTime() - new Date(a.updated).getTime()).slice(0, limit).map((m) => ({ key: m.key, title: m.title, category: m.category, tags: m.tags, updated: m.updated }));
+  const upper = before ? parseRelativeDate(before) ?? new Date(before) : null;
+  return Object.values(memIndex).filter((m) => new Date(m.updated) >= cutoff && (!upper || new Date(m.updated) < upper) && (!category || m.category === category)).sort((a, b) => new Date(b.updated).getTime() - new Date(a.updated).getTime()).slice(0, limit).map((m) => ({ key: m.key, title: m.title, category: m.category, tags: m.tags, updated: m.updated }));
 }
 function getRelatedMemories(args) {
   const { key, limit = 10, includeContent = false } = args;
@@ -16336,7 +16351,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           query: { type: "string" },
           full: { type: "boolean", default: false },
-          since: { type: "string", description: "Relative (7d, 2w, 1m) or ISO date." },
+          since: { type: "string", description: "Relative (7d, 2w, 1m) or ISO date. Lower bound on updated." },
+          before: { type: "string", description: "Relative (7d, 2w, 1m) or ISO date. Upper bound on updated (exclusive); combine with since for a date range." },
           limit: { type: "number", default: 10 },
           excludeJournal: { type: "boolean", default: true },
           hybrid: { type: "boolean", default: true, description: "Fuse TF-IDF with vector search (RRF) when available." }
@@ -16393,7 +16409,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           query: { type: "string" },
           limit: { type: "number", default: 20 },
-          since: { type: "string" },
+          since: { type: "string", description: "Relative or ISO date. Lower bound on updated." },
+          before: { type: "string", description: "Relative or ISO date. Upper bound on updated (exclusive); combine with since for a date range." },
           category: { type: "string" },
           tags: { type: "array", items: { type: "string" } }
         },
@@ -16423,7 +16440,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: "object",
         properties: {
-          since: { type: "string" },
+          since: { type: "string", description: "Relative or ISO date. Lower bound on updated." },
+          before: { type: "string", description: "Relative or ISO date. Upper bound on updated (exclusive); combine with since for a date range." },
           limit: { type: "number", default: 50 },
           category: { type: "string" }
         }
