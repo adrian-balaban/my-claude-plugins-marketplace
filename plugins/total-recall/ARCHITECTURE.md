@@ -196,6 +196,9 @@ query
   │    (hybrid fusion can surface them via the vector rank even when tfidfSearch excluded them)
   ├─ filter by `since` / `before` date (optional; `before` is an exclusive upper bound,
   │    combinable with `since` for a date range)
+  ├─ filter by `minScore` (optional floor; default 0 = no filtering. Scores are NOT
+  │    comparable across hybrid modes — RRF-fused scores are tiny, raw TF-IDF larger;
+  │    use hybrid=false for a predictable threshold scale)
   ├─ slice to `limit`
   └─ for each result:
        ├─ meta.accessCount++; meta.lastAccessed = now

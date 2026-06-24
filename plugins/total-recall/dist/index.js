@@ -16071,7 +16071,7 @@ function reciprocalRankFusion(lists, k = 60) {
 
 // src/tools/recall.ts
 async function recallMemory(args) {
-  const { query, full = false, since, before, limit = 10, excludeJournal = true, hybrid = true } = args;
+  const { query, full = false, since, before, minScore = 0, limit = 10, excludeJournal = true, hybrid = true } = args;
   const tfidfResults = tfidfSearch(query, excludeJournal);
   let ranked;
   if (hybrid) {
@@ -16107,6 +16107,9 @@ async function recallMemory(args) {
       return updated ? new Date(updated) < cutoff : false;
     });
   }
+  if (minScore > 0) {
+    ranked = ranked.filter((r) => r.score >= minScore);
+  }
   ranked = ranked.slice(0, limit);
   return ranked.map((r) => {
     const meta2 = memIndex[r.key];
@@ -16131,7 +16134,7 @@ async function recallMemory(args) {
   }).filter(Boolean);
 }
 function searchIndex(args) {
-  const { query, limit = 20, since, before, category, tags: filterTags } = args;
+  const { query, limit = 20, since, before, minScore = 0, category, tags: filterTags } = args;
   let results = tfidfSearch(query);
   if (since) {
     const cutoff = parseRelativeDate(since) ?? new Date(since);
@@ -16149,6 +16152,7 @@ function searchIndex(args) {
   }
   if (category) results = results.filter((r) => memIndex[r.key]?.category === category);
   if (filterTags?.length) results = results.filter((r) => filterTags.every((t) => memIndex[r.key]?.tags.includes(t)));
+  if (minScore > 0) results = results.filter((r) => r.score >= minScore);
   return results.slice(0, limit).map((r) => {
     const m = memIndex[r.key];
     return m ? { key: r.key, title: m.title, category: m.category, tags: m.tags, updated: m.updated, score: r.score, preview: m.contentPreview, estimatedTokens: m.tokenEstimate } : null;
@@ -16353,6 +16357,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           full: { type: "boolean", default: false },
           since: { type: "string", description: "Relative (7d, 2w, 1m) or ISO date. Lower bound on updated." },
           before: { type: "string", description: "Relative (7d, 2w, 1m) or ISO date. Upper bound on updated (exclusive); combine with since for a date range." },
+          minScore: { type: "number", default: 0, description: "Minimum score; drop results below this. Default 0 = no filtering. Scores are NOT comparable across hybrid modes (RRF-fused scores are tiny; use hybrid=false for predictable TF-IDF thresholds)." },
           limit: { type: "number", default: 10 },
           excludeJournal: { type: "boolean", default: true },
           hybrid: { type: "boolean", default: true, description: "Fuse TF-IDF with vector search (RRF) when available." }
@@ -16412,6 +16417,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           limit: { type: "number", default: 20 },
           since: { type: "string", description: "Relative or ISO date. Lower bound on updated." },
           before: { type: "string", description: "Relative or ISO date. Upper bound on updated (exclusive); combine with since for a date range." },
+          minScore: { type: "number", default: 0, description: "Minimum TF-IDF score; drop results below this. Default 0 = no filtering." },
           category: { type: "string" },
           tags: { type: "array", items: { type: "string" } }
         },

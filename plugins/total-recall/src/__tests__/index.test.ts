@@ -248,6 +248,14 @@ describe('recall_memory', () => {
     const res = result(await callTool('recall_memory', { query: 'zzznomatch' }));
     expect(res.length).toBe(0);
   });
+
+  it('minScore filters out low-scoring results (0 = no filtering)', async () => {
+    // Default 0 preserves the baseline result set; an unreachable floor drops all.
+    const baseline = result(await callTool('recall_memory', { query: 'kafka' }));
+    expect(baseline.length).toBeGreaterThan(0);
+    const strict = result(await callTool('recall_memory', { query: 'kafka', minScore: 1e9 }));
+    expect(strict.length).toBe(0);
+  });
 });
 
 // ─── list_memories ────────────────────────────────────────────────────────────
@@ -393,6 +401,13 @@ describe('search_index', () => {
   it('respects limit', async () => {
     const res = result(await callTool('search_index', { query: 'flink', limit: 1 }));
     expect(res.length).toBeLessThanOrEqual(1);
+  });
+
+  it('minScore filters out low-scoring results (0 = no filtering)', async () => {
+    const baseline = result(await callTool('search_index', { query: 'flink' }));
+    expect(baseline.length).toBeGreaterThan(0);
+    const strict = result(await callTool('search_index', { query: 'flink', minScore: 1e9 }));
+    expect(strict.length).toBe(0);
   });
 });
 

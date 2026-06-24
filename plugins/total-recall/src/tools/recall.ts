@@ -11,7 +11,7 @@ import { searchVector } from '../vectorStore.js';
 import { reciprocalRankFusion } from '../rrf.js';
 
 export async function recallMemory(args: any): Promise<any> {
-  const { query, full = false, since, before, limit = 10, excludeJournal = true, hybrid = true } = args;
+  const { query, full = false, since, before, minScore = 0, limit = 10, excludeJournal = true, hybrid = true } = args;
   const tfidfResults = tfidfSearch(query, excludeJournal);
 
   // Optional hybrid path: fuse the TF-IDF rank (already decay-weighted by Ebbinghaus
@@ -70,6 +70,16 @@ export async function recallMemory(args: any): Promise<any> {
     });
   }
 
+  // Minimum-score floor (mirrors danilop/claude-total-recall's `threshold`):
+  // drop results whose (fused or TF-IDF) score is below this. Default 0 = no
+  // filtering, byte-identical to prior behavior. NOTE scores are NOT comparable
+  // across hybrid modes — RRF-fused scores are tiny (~1/(60+rank)) while raw
+  // TF-IDF scores are larger; tune minScore for the mode you call with, or pass
+  // hybrid=false for a predictable TF-IDF threshold scale.
+  if (minScore > 0) {
+    ranked = ranked.filter(r => r.score >= minScore);
+  }
+
   ranked = ranked.slice(0, limit);
 
   return ranked.map(r => {
@@ -97,7 +107,7 @@ export async function recallMemory(args: any): Promise<any> {
 }
 
 export function searchIndex(args: any): any {
-  const { query, limit = 20, since, before, category, tags: filterTags } = args;
+  const { query, limit = 20, since, before, minScore = 0, category, tags: filterTags } = args;
   let results = tfidfSearch(query);
 
   if (since) {
@@ -117,6 +127,11 @@ export function searchIndex(args: any): any {
   }
   if (category) results = results.filter(r => memIndex[r.key]?.category === category);
   if (filterTags?.length) results = results.filter(r => filterTags.every((t: string) => memIndex[r.key]?.tags.includes(t)));
+
+  // Minimum-score floor (mirrors danilop/claude-total-recall's `threshold`).
+  // Default 0 = no filtering (current behavior). search_index is TF-IDF-only,
+  // so scores are on the raw TF-IDF scale (no RRF rescale caveat here).
+  if (minScore > 0) results = results.filter(r => r.score >= minScore);
 
   return results.slice(0, limit).map(r => {
     const m = memIndex[r.key];
